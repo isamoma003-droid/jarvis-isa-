@@ -165,6 +165,7 @@ TOOLS = [
             "required": ["path"],
         },
         handler=read_file,
+        untrusted=True,
     ),
     Tool(
         name="write_file",
@@ -239,5 +240,6 @@ TOOLS = [
             "required": ["pattern"],
         },
         handler=search_text,
+        untrusted=True,
     ),
 ]

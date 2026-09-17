@@ -21,6 +21,7 @@ from .errors import JarvisError
 from .events import (
     ErrorEvent,
     Notice,
+    NoticeSurfaced,
     ReminderFired,
     TextDelta,
     ThinkingDelta,
@@ -44,7 +45,12 @@ HELP = """\
   /tools                what Jarvis can do
   /memory               what Jarvis remembers
   /reminders            pending reminders
+  /notices              what Jarvis surfaced on its own
+  /dismiss <id|all>     clear a notice
+  /checks               scheduled checks and when they next run
   /tasks                delegated background work
+  /pause, /resume       the kill switch: stop or restart all proactive behaviour
+  /cost                 tokens and spend this session
   /approve <policy>     auto | prompt | deny
   /thinking [on|off]    show summarized reasoning
   /new                  start a fresh conversation
@@ -111,6 +117,22 @@ class Terminal:
             console.print()
             console.print(
                 Panel(escape(event.text), title="⏰ reminder", border_style="yellow", expand=False)
+            )
+            self._mode = None
+        elif isinstance(event, NoticeSurfaced):
+            console.print()
+            border = "red" if event.level == "urgent" else "cyan"
+            body = escape(event.text)
+            if event.detail:
+                body += f"\n[dim]{escape(_short(event.detail, 300))}[/dim]"
+            console.print(
+                Panel(
+                    body,
+                    title=f"◈ {escape(event.source)}",
+                    subtitle=f"[dim]/dismiss {event.notice_id}[/dim]",
+                    border_style=border,
+                    expand=False,
+                )
             )
             self._mode = None
         elif isinstance(event, ErrorEvent):
@@ -200,6 +222,80 @@ def _show_tasks(session: Session) -> None:
         )
 
 
+def _show_notices(session: Session) -> None:
+    notices = session.open_notices(limit=100)
+    if not notices:
+        console.print("  [dim]nothing waiting[/dim]")
+        return
+    table = Table(box=None, pad_edge=False)
+    table.add_column("id", style="bold")
+    table.add_column("", width=1)
+    table.add_column("source", style="dim")
+    table.add_column("what")
+    for notice in notices:
+        mark = {"urgent": "[red]![/red]", "notify": "[yellow]*[/yellow]"}.get(notice.level, " ")
+        again = f" [dim]×{notice.repeats + 1}[/dim]" if notice.repeats else ""
+        table.add_row(
+            f"#{notice.id}", mark, escape(notice.source), escape(_short(notice.text, 70)) + again
+        )
+    console.print(table)
+    # Looking at the inbox counts as seeing it; clearing still takes /dismiss.
+    session.store.mark_delivered([n.id for n in notices if n.status == "pending"])
+    console.print("  [dim]/dismiss <id> to clear one, /dismiss all to clear the lot[/dim]")
+
+
+def _show_checks(session: Session) -> None:
+    from .heartbeat import load_checks
+    from .tools.reminder_tools import _local
+
+    checks = load_checks(session.config.checks)
+    if not checks:
+        console.print("  [dim]no checks configured - add [[jarvis.checks]] to config.toml[/dim]")
+        return
+    states = {doc["_id"]: doc for doc in session.store.all_check_states()}
+    table = Table(box=None, pad_edge=False)
+    table.add_column("check", style="bold cyan")
+    table.add_column("every", style="dim")
+    table.add_column("surfaces", style="dim")
+    table.add_column("next", style="dim")
+    table.add_column("last")
+    for check in checks:
+        state = states.get(check.name, {})
+        due = state.get("next_due")
+        last = str(state.get("last_status") or "-")
+        colour = {"fail": "red", "error": "red", "timeout": "yellow"}.get(last, "green")
+        table.add_row(
+            check.name if check.enabled else f"{check.name} (off)",
+            check.every,
+            f"{check.surface} → {check.level}",
+            _local(due.isoformat()) if due else "-",
+            f"[{colour}]{last}[/{colour}]",
+        )
+    console.print(table)
+
+
+def _show_cost(session: Session) -> None:
+    totals = session.audit.totals
+    console.print(
+        f"  [bold]{totals.turns}[/bold] turns, [bold]{totals.tools}[/bold] tool calls\n"
+        f"  [dim]{totals.input_tokens:,} in · {totals.output_tokens:,} out · "
+        f"{totals.cache_read_tokens:,} cached[/dim]\n"
+        f"  [bold]${totals.cost:.4f}[/bold] [dim]this session, estimated "
+        f"({session.config.model})[/dim]"
+    )
+
+
+def _set_paused(session: Session, paused: bool) -> None:
+    session.set_paused(paused)
+    if paused:
+        console.print(
+            "  [yellow]paused[/yellow] [dim]- checks, reminders and background work are "
+            "held. You can still talk to me. /resume to restart.[/dim]"
+        )
+    else:
+        console.print("  [green]resumed[/green] [dim]- proactive behaviour is back on[/dim]")
+
+
 def handle_command(line: str, terminal: Terminal) -> bool:
     """Run a /command. Returns False when it is time to quit."""
     session = terminal.session
@@ -216,6 +312,28 @@ def handle_command(line: str, terminal: Terminal) -> bool:
         _show_memory(session)
     elif command == "reminders":
         _show_reminders(session)
+    elif command == "notices":
+        _show_notices(session)
+    elif command == "dismiss":
+        if argument in {"all", "*"}:
+            cleared = session.store.dismiss_all_notices()
+            console.print(f"  [dim]dismissed {cleared}[/dim]")
+        elif argument.lstrip("#").isdigit():
+            notice_id = int(argument.lstrip("#"))
+            done = session.store.dismiss_notice(notice_id)
+            console.print(
+                f"  [dim]dismissed #{notice_id}[/dim]" if done else "  [dim]not open[/dim]"
+            )
+        else:
+            console.print("  [red]/dismiss <id> or /dismiss all[/red]")
+    elif command == "checks":
+        _show_checks(session)
+    elif command == "cost":
+        _show_cost(session)
+    elif command in {"pause", "stop"}:
+        _set_paused(session, True)
+    elif command in {"resume", "start"}:
+        _set_paused(session, False)
     elif command == "tasks":
         _show_tasks(session)
     elif command == "new":
@@ -242,13 +360,25 @@ def repl(config: JarvisConfig) -> int:
     session = Session(config, interface="cli")
     terminal = Terminal(session)
     session.context.confirm = terminal.confirm
-    session.start_reminders(terminal.handle)
+    session.start_heartbeat(terminal.handle)
 
     console.print(f"[bold cyan]{BANNER}[/bold cyan]", highlight=False)
+    paused = " · [yellow]paused[/yellow]" if session.paused else ""
     console.print(
         f"  [dim]{config.model} · workspace {config.workspace} · "
-        f"approval {config.approval} · /help[/dim]\n"
+        f"approval {config.approval}{paused} · /help[/dim]\n"
     )
+
+    # Anything raised while nothing was attached has been waiting for this.
+    held = session.catch_up()
+    if held:
+        console.print(f"  [dim]while you were away ({len(held)}):[/dim]")
+        for event in held:
+            terminal.handle(event)
+        console.print()
+    waiting = len(session.open_notices(limit=100)) - len(held)
+    if waiting > 0:
+        console.print(f"  [dim]{waiting} quieter notice(s) in the inbox - /notices[/dim]\n")
 
     try:
         while True:
@@ -304,6 +434,19 @@ def doctor(config: JarvisConfig) -> int:
     )
     check("workspace", config.workspace.is_dir(), str(config.workspace))
     try:
+        from .heartbeat import load_checks, parse_quiet_hours
+
+        checks = load_checks(config.checks)
+        window = parse_quiet_hours(config.quiet_hours)
+        check(
+            "heartbeat",
+            True,
+            f"{len(checks)} check(s), every {config.heartbeat_seconds}s, "
+            f"quiet {config.quiet_hours if window else 'never'}",
+        )
+    except (JarvisError, ValueError) as exc:
+        check("heartbeat", False, str(exc))
+    try:
         config.ensure_dirs()
         check("data directory", True, str(config.data_dir))
     except OSError as exc:
@@ -316,6 +459,14 @@ def doctor(config: JarvisConfig) -> int:
         store = MongoStore(config.mongodb_uri, config.mongodb_db, ensure_indexes=False)
         store.ping()
         check("mongodb", True, f"{redact_uri(config.mongodb_uri)} -> {config.mongodb_db}")
+        waiting = len(store.open_notices(limit=200))
+        if store.is_paused():
+            console.print(
+                "  [yellow]![/yellow] proactive behaviour is [yellow]paused[/yellow] "
+                "[dim]- `jarvis resume` to restart it[/dim]"
+            )
+        if waiting:
+            console.print(f"  [cyan]◈[/cyan] {waiting} notice(s) waiting [dim]- /notices[/dim]")
     except StorageError as exc:
         check("mongodb", False, str(exc))
     except Exception as exc:
@@ -399,6 +550,105 @@ def reminders_command(config: JarvisConfig, args: argparse.Namespace) -> int:
         store.close()
 
 
+def notices_command(config: JarvisConfig, args: argparse.Namespace) -> int:
+    """The inbox from outside a conversation - and the way to empty it."""
+    from .memory import MongoStore
+    from .tools.reminder_tools import _local
+
+    store = MongoStore(config.mongodb_uri, config.mongodb_db)
+    store.ping()
+    try:
+        if args.dismiss is not None:
+            if args.dismiss == "all":
+                console.print(f"  dismissed {store.dismiss_all_notices()}")
+            elif args.dismiss.lstrip("#").isdigit():
+                notice_id = int(args.dismiss.lstrip("#"))
+                ok = store.dismiss_notice(notice_id)
+                console.print(f"  dismissed #{notice_id}" if ok else "  not open")
+            else:
+                console.print("  [red]--dismiss takes an id or 'all'[/red]")
+                return 2
+            return 0
+        notices = store.open_notices(limit=200)
+        if not notices:
+            console.print("  [dim]nothing waiting[/dim]")
+            return 0
+        for notice in notices:
+            mark = {"urgent": "[red]![/red]", "notify": "[yellow]*[/yellow]"}.get(
+                notice.level, "[dim]-[/dim]"
+            )
+            console.print(
+                f"  {mark} [bold]#{notice.id}[/bold] [dim]{_local(notice.created_at)} "
+                f"{escape(notice.source)}[/dim] {escape(notice.text)}"
+            )
+        store.mark_delivered([n.id for n in notices if n.status == "pending"])
+        return 0
+    finally:
+        store.close()
+
+
+def pause_command(config: JarvisConfig, paused: bool) -> int:
+    """The kill switch, usable without starting a session."""
+    from .memory import MongoStore
+
+    store = MongoStore(config.mongodb_uri, config.mongodb_db)
+    store.ping()
+    try:
+        store.set_paused(paused)
+        if paused:
+            console.print(
+                "[yellow]paused[/yellow] - every heartbeat holds: no checks, no reminders, "
+                "no background work. Conversations still work. `jarvis resume` to restart."
+            )
+        else:
+            console.print("[green]resumed[/green] - proactive behaviour is back on.")
+        return 0
+    finally:
+        store.close()
+
+
+def log_command(config: JarvisConfig, args: argparse.Namespace) -> int:
+    """What Jarvis did, and what it cost."""
+    from .audit import default_path, read_totals
+
+    path = default_path(config.data_dir)
+    if not path.exists():
+        console.print(f"  [dim]no audit log yet at {path}[/dim]")
+        return 0
+    if args.totals:
+        totals = read_totals(path)
+        console.print(
+            f"  [bold]{totals.turns}[/bold] turns · [bold]{totals.tools}[/bold] tool calls\n"
+            f"  [dim]{totals.input_tokens:,} in · {totals.output_tokens:,} out · "
+            f"{totals.cache_read_tokens:,} cached[/dim]\n"
+            f"  [bold]${totals.cost:.4f}[/bold] [dim]estimated, all time[/dim]\n"
+            f"  [dim]{path}[/dim]"
+        )
+        return 0
+
+    from .audit import AuditLog
+
+    rows = AuditLog(path, enabled=False).entries(limit=args.lines, kind=args.kind or "")
+    if not rows:
+        console.print("  [dim]nothing logged yet[/dim]")
+        return 0
+    colours = {"approval": "yellow", "injection": "red", "notice": "cyan", "turn": "dim"}
+    for row in rows:
+        kind = str(row.get("kind", "?"))
+        rest = {
+            key: value
+            for key, value in row.items()
+            if key not in {"at", "kind", "session"}
+        }
+        body = " ".join(f"{key}={value}" for key, value in rest.items())
+        colour = colours.get(kind, "white")
+        console.print(
+            f"  [dim]{escape(str(row.get('at', '')))}[/dim] "
+            f"[{colour}]{kind:10}[/{colour}] {escape(_short(body, 160))}"
+        )
+    return 0
+
+
 # ----------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -445,6 +695,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--status", default="pending", choices=["pending", "done", "cancelled", "all"]
     )
     reminders.add_argument("--cancel", type=int, metavar="ID")
+
+    notices = sub.add_parser("notices", help="What Jarvis surfaced while you were away.")
+    notices.add_argument("--dismiss", metavar="ID|all", help="Clear a notice, or all of them.")
+
+    sub.add_parser("pause", help="Kill switch: stop all proactive behaviour.")
+    sub.add_parser("resume", help="Restart proactive behaviour.")
+
+    log = sub.add_parser("log", help="The audit trail: what Jarvis did, and what it cost.")
+    log.add_argument("-n", "--lines", type=int, default=40, help="How many entries.")
+    log.add_argument(
+        "--kind",
+        help="Only this kind: tool, approval, turn, notice, check, injection, kill_switch.",
+    )
+    log.add_argument("--totals", action="store_true", help="Just the tally.")
     return parser
 
 
@@ -469,6 +733,12 @@ def main(argv: list[str] | None = None) -> int:
             return memory_command(config, args)
         if args.command == "reminders":
             return reminders_command(config, args)
+        if args.command == "notices":
+            return notices_command(config, args)
+        if args.command in {"pause", "resume"}:
+            return pause_command(config, args.command == "pause")
+        if args.command == "log":
+            return log_command(config, args)
         if args.command == "ask":
             return ask_once(config, " ".join(args.question))
         if args.command == "web":

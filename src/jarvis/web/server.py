@@ -101,10 +101,19 @@ def create_app(config: JarvisConfig, session_factory: Any = None) -> Any:
             send({"kind": "approval_request", "id": request_id, "action": action, "detail": detail})
             answered = waiting.event.wait(timeout=APPROVAL_TIMEOUT)
             pending.pop(request_id, None)
-            return answered and waiting.granted
+            if not answered:
+                # Timed out into the safe default: do nothing, and leave a note
+                # rather than silently treating absence as a refusal.
+                session.context.notify(
+                    f"unanswered: wanted to {action}",
+                    f"{detail}\n\nNot done - the request went unanswered for "
+                    f"{int(APPROVAL_TIMEOUT)}s and timed out.",
+                )
+                return False
+            return waiting.granted
 
         session.context.confirm = confirm
-        session.start_reminders(send_event)
+        session.start_heartbeat(send_event)
 
         async def pump() -> None:
             while True:
@@ -130,7 +139,13 @@ def create_app(config: JarvisConfig, session_factory: Any = None) -> Any:
             "workspace": str(config.workspace),
             "approval": config.approval,
             "tools": session.registry.names(),
+            "paused": session.paused,
+            "waiting": len(session.open_notices(limit=100)),
         })
+        # Whatever was raised while no browser was attached has been held for
+        # exactly this moment.
+        for held in session.catch_up():
+            send_event(held)
 
         try:
             while True:
@@ -159,6 +174,32 @@ def create_app(config: JarvisConfig, session_factory: Any = None) -> Any:
                 elif kind == "reset":
                     session.reset()
                     send({"kind": "notice", "message": "fresh conversation", "level": "info"})
+                elif kind == "dismiss":
+                    target = message.get("id")
+                    if target == "all":
+                        cleared = session.store.dismiss_all_notices()
+                        send({"kind": "dismissed", "id": "all", "count": cleared})
+                    elif target is not None:
+                        ok = session.store.dismiss_notice(int(target))
+                        send({"kind": "dismissed", "id": int(target), "count": int(ok)})
+                elif kind == "pause":
+                    session.set_paused(bool(message.get("paused", True)))
+                    send({"kind": "paused", "paused": session.paused})
+                elif kind == "notices":
+                    send({
+                        "kind": "notices",
+                        "notices": [
+                            {
+                                "id": notice.id,
+                                "text": notice.text,
+                                "detail": notice.detail,
+                                "level": notice.level,
+                                "source": notice.source,
+                                "created_at": notice.created_at,
+                            }
+                            for notice in session.open_notices(limit=100)
+                        ],
+                    })
         except WebSocketDisconnect:
             pass
         finally:

@@ -13,6 +13,7 @@ import subprocess
 from typing import Any
 
 from ..errors import ToolError
+from ..guard import outward_reason
 from .base import Tool, ToolContext, truncate
 
 REFUSED = [
@@ -55,7 +56,13 @@ def run_shell(ctx: ToolContext, args: dict[str, Any]) -> str:
     timeout = int(args.get("timeout") or ctx.config.shell_timeout)
     timeout = max(1, min(timeout, 600))
 
-    if not _is_read_only(command):
+    # Checked before the read-only shortcut and before the ordinary gate: a
+    # command that leaves the machine is never waived by the approval policy,
+    # and one previous yes does not cover the next send.
+    reaching_out = outward_reason(command)
+    if reaching_out:
+        ctx.approve(reaching_out, command, outward=True)
+    elif not _is_read_only(command):
         ctx.approve("run shell command", command)
 
     try:
@@ -88,7 +95,9 @@ TOOLS = [
         description=(
             "Run a bash command in the workspace directory and return its output. "
             "Use this for git, builds, tests, and anything the file tools do not cover. "
-            "Commands that change state may need the user's approval first."
+            "Commands that change state need the user's approval first, and anything "
+            "that reaches the network or another machine - pushing, sending, uploading - "
+            "is confirmed every time, however the approval policy is set."
         ),
         input_schema={
             "type": "object",
@@ -100,5 +109,6 @@ TOOLS = [
         },
         handler=run_shell,
         dangerous=True,
+        untrusted=True,
     ),
 ]

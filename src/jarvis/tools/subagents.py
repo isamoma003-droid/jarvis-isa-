@@ -92,6 +92,7 @@ def _run_profile(
     task_text: str,
     notes: str,
     log: list[str] | None = None,
+    unattended: bool = False,
 ) -> str:
     """Run one sub-agent turn to completion and return its final answer.
 
@@ -116,6 +117,11 @@ def _run_profile(
         emit=record,
         confirm=ctx.confirm,
         depth=ctx.depth + 1,
+        audit=ctx.audit,
+        # A background sub-agent runs with nobody watching, so it must never
+        # block on an approval no one is there to give. The gate refuses and
+        # leaves a note instead.
+        unattended=unattended or ctx.unattended,
     )
     agent = Agent(
         client=ctx.client,
@@ -159,7 +165,9 @@ def delegate(ctx: ToolContext, args: dict[str, Any]) -> str:
         raise ToolError("background delegation is not available in this interface")
 
     def work(task_record: Any) -> str:
-        return _run_profile(ctx, profile, task_text, notes, log=task_record.log)
+        return _run_profile(
+            ctx, profile, task_text, notes, log=task_record.log, unattended=True
+        )
 
     task = ctx.tasks.submit(description=task_text, profile=profile.name, work=work)
     ctx.post(Notice(message=f"delegated to {profile.name} in the background as {task.id}"))

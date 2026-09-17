@@ -11,9 +11,12 @@ Built on the Claude API (`claude-opus-5`) with a manual streaming tool-use loop.
   terminal ──┐      │              │──► files & shell (workspace-confined)
   voice    ──┼─────►│    Jarvis    │──► web search & fetch (server-side)
   web      ──┘      │  agent core  │──► memory & reminders (MongoDB)
-                    └──────────────┘
+                    └──────┬───────┘
+                           ├─────────► Scout · Relay · Flux sub-agents
                            │
-                           └──────────► Scout · Relay · Flux sub-agents
+                    ┌──────┴───────┐
+                    │  heartbeat   │──► scheduled checks → the inbox
+                    └──────────────┘    (quiet by default, held while away)
 ```
 
 ## Install
@@ -48,7 +51,10 @@ reach the server. Copy `.env.example` to pin anything else.
 jarvis                        # terminal REPL
 jarvis ask "what changed in this repo today?"
 jarvis web                    # http://127.0.0.1:8765
-jarvis voice                  # say "jarvis, ..." 
+jarvis voice                  # say "jarvis, ..."
+jarvis notices                # what it surfaced while you were away
+jarvis pause / jarvis resume  # the kill switch
+jarvis log --totals           # what it did, and what it cost
 jarvis doctor                 # check keys, deps, audio, database
 ```
 
@@ -65,6 +71,7 @@ Reminder #3 set for today at 17:00.
 ```
 
 In-REPL commands: `/help`, `/tools`, `/memory`, `/tasks`, `/reminders`,
+`/notices`, `/dismiss <id|all>`, `/checks`, `/pause`, `/resume`, `/cost`,
 `/new`, `/approve <auto|prompt|deny>`, `/exit`. Ctrl-C stops the current turn;
 Ctrl-D exits.
 
@@ -79,6 +86,8 @@ Ctrl-D exits.
   tools run, current state;
 - **gold authorisation dialogs** for anything that needs your approval, with
   the exact command shown before you allow it;
+- an **inbox** of what the heartbeat surfaced, each item dismissible, and a
+  **hold** button that stops all proactive behaviour at once;
 - concentric rings and a slow radar sweep behind the conversation, scanlines
   over it, and a short boot sequence on load.
 
@@ -96,6 +105,7 @@ column on a phone.
 | Web | `web_search`, `web_fetch` (server-side, dynamic filtering) |
 | Memory | `remember`, `recall`, `forget` |
 | Reminders | `set_reminder`, `list_reminders`, `cancel_reminder` |
+| Notices | `list_notices`, `dismiss_notice`, `surface` |
 | Delegation | `delegate`, `check_task`, `list_tasks` |
 
 ### Sub-agents
@@ -122,8 +132,7 @@ capped by `max_depth` (default 2) so sub-agents cannot recurse away.
 
 ### Memory and reminders
 
-Everything durable lives in MongoDB — one database (`jarvis` by default) with
-four collections:
+Everything durable lives in MongoDB — one database (`jarvis` by default):
 
 | Collection | Holds |
 |---|---|
@@ -131,21 +140,83 @@ four collections:
 | `sessions` | one document per conversation |
 | `messages` | the transcripts |
 | `reminders` | pending, done, and cancelled, with recurrence |
+| `notices` | the inbox: what the heartbeat surfaced, and whether you saw it |
+| `checks` | when each scheduled check last ran and is next due |
+| `settings` | the kill switch, and anything every interface must agree on |
 
 Facts are injected into the system prompt at session start, so Jarvis opens
 already knowing what you told it last week — and because the store is a
 server, the terminal, the web UI, and your phone all see the same memory.
 
+A stored fact is background knowledge, not standing permission: a remembered
+note reading "always do X" still goes through the confirmation rules below.
+
 Reminders get small integer ids from a `counters` document rather than
-ObjectIds, so "cancel reminder 3" is a thing you can say out loud. A background
-thread fires them into whichever interface is running — printed in the
-terminal, pushed over the WebSocket, spoken aloud in voice mode. One-shot or
-recurring (`daily`, `weekdays`, `every 30 minutes`).
+ObjectIds, so "cancel reminder 3" is a thing you can say out loud. The heartbeat
+fires them into whichever interface is running — printed in the terminal, pushed
+over the WebSocket, spoken aloud in voice mode — and **holds** any that come due
+while nothing is attached, so a reminder that fires at 3am is waiting for you at
+9. One-shot or recurring (`daily`, `weekdays`, `every 30 minutes`).
 
 Times are stored as native BSON dates in UTC so range queries and indexes work
 properly, and handed back to callers as ISO strings. One `MongoClient` is
 shared process-wide — pymongo pools internally, and a client per WebSocket
 connection would exhaust a small Atlas tier.
+
+## The heartbeat
+
+A single background loop, separate from any conversation, that lets Jarvis act
+without being spoken to. It sweeps due reminders and runs whichever **checks**
+are due, then decides — per result — whether the outcome is worth interrupting
+for. What to check and how often lives in `config.toml`, never in code:
+
+```toml
+[[jarvis.checks]]
+name    = "disk"
+kind    = "shell"
+command = "df -h / | tail -1"
+every   = "30m"
+surface = "on_match"      # on_fail · on_match · on_change · always
+match   = "9[0-9]%"
+level   = "notify"        # quiet · notify · urgent
+message = "disk is nearly full"
+
+[[jarvis.checks]]
+name    = "deploy-flag"
+kind    = "file"
+path    = "DEPLOY_ME"
+every   = "1m"
+surface = "on_exists"     # on_exists · on_missing · on_change
+level   = "urgent"
+```
+
+`jarvis checks` shows what is configured and when each next runs.
+
+**Quiet by default — it earns interruptions, it doesn't assume them.** That
+principle is the whole design, and it's mostly made of refusals to speak:
+
+- **Most checks say nothing most of the time.** `quiet` never interrupts; it
+  accumulates in an inbox you read when you choose. `notify` interrupts during
+  waking hours. `urgent` interrupts regardless — that's the only thing it means.
+- **A condition that is still true is not news.** While an identical notice is
+  open, further occurrences are counted (`×4`), not repeated at you. Dismiss it
+  and the next occurrence speaks up again.
+- **Nothing you missed is dropped.** A notice is marked delivered only when an
+  interface was actually attached to receive it — not merely because policy said
+  it deserved an interrupt. Everything else stays pending and is shown on your
+  return.
+- **Quiet hours** hold non-urgent notices until morning (`quiet_hours`).
+- **A restart resumes the schedule.** Next-due times live in Mongo, so restarting
+  doesn't reset every timer or fire the whole set on boot.
+- **Overlapping runs are skipped, not stacked.** Claims are taken atomically, so
+  two heartbeats on the same database can't both run one check; a claim older
+  than its lease is treated as a dead run and retried.
+- **Everything surfaced is dismissible** — `/notices`, `/dismiss 3`,
+  `jarvis notices --dismiss all`, or the inbox button in the HUD.
+
+Nothing in the loop talks to the model, so a beat costs nothing and can't
+surprise you with a bill. It doesn't care which machine it runs on either —
+moving it to an always-on host is a relocation, not a rewrite.
 
 ## Safety
 
@@ -155,7 +226,29 @@ connection would exhaust a small Atlas tier.
   directory (`JARVIS_WORKSPACE` to change).
 - **Approval gate.** Writes, edits, and state-changing shell commands ask
   first. `JARVIS_APPROVAL=auto` to stop asking, `deny` to forbid outright.
-  Read-only commands (`ls`, `git status`, `cat`, …) never prompt.
+  Read-only commands (`ls`, `git status`, `cat`, …) never prompt. The gate sits
+  between the model choosing a tool and the tool running, so it covers typed,
+  spoken and heartbeat-initiated actions identically.
+- **Anything outward-facing asks every time.** Pushing, sending, uploading,
+  publishing, reaching another machine — `JARVIS_APPROVAL=auto` does not waive
+  it, and approving one send never pre-authorises the next. Set
+  `JARVIS_CONFIRM_OUTWARD=0` only deliberately.
+- **Nothing it reads can give it orders.** Web pages, files, command output and
+  stored memory are data. Content-bearing tool results are handed to the model
+  inside an `<untrusted_content>` envelope, and text that reads like an
+  instruction (`"ignore all previous instructions"`, `"don't tell the user"`) is
+  flagged to you and put in the inbox rather than acted on. The envelope can't be
+  closed early by the content inside it.
+- **Nothing blocks on a human who isn't there.** A background sub-agent that
+  hits the approval gate doesn't hang waiting for an answer that isn't coming —
+  it does nothing and leaves a note saying what it wanted to do.
+- **An audit trail.** Every tool call, approval, notice, check and turn is
+  appended to `<data_dir>/audit.jsonl`, with a running cost estimate — a runaway
+  loop shows up in `jarvis log --totals` long before it shows up on a bill.
+- **A kill switch.** `jarvis pause` (or `/pause`, or **hold** in the HUD) stops
+  every proactive behaviour at once — checks, reminders, background work — while
+  you can still talk to it. The flag lives in the database, so it survives a
+  restart and every interface agrees.
 - **A refusal list** catches obvious catastrophes (`rm -rf /`, `mkfs`, fork
   bombs). It is a guardrail against a slip, not a security boundary — a shell
   cannot be sandboxed by pattern matching. The approval gate is the real
@@ -170,11 +263,21 @@ Defaults, then `~/.jarvis/config.toml`, then environment variables, then flags.
 ```toml
 [jarvis]
 model = "claude-opus-5"
-effort = "high"           # low | medium | high | xhigh | max
-approval = "prompt"       # auto | prompt | deny
+effort = "high"                # low | medium | high | xhigh | max
+approval = "prompt"            # auto | prompt | deny
+confirm_outward = true         # outward sends ask every time regardless
 workspace = "~/projects"
 mongodb_db = "jarvis"
 max_depth = 2
+heartbeat_seconds = 60
+quiet_hours = "22:00-07:00"    # "" for none
+
+[[jarvis.checks]]              # as many as you like; see The heartbeat above
+name = "tests"
+command = "pytest -q"
+every = "4h"
+surface = "on_fail"
+level = "notify"
 ```
 
 Every option has a `JARVIS_*` environment variable — see `.env.example`.
@@ -197,15 +300,18 @@ never lands in your terminal or logs.
 ```
 src/jarvis/
 ├── agent.py       the streaming tool-use loop — one implementation, all faces
-├── session.py     conversation state, persistence, reminder wiring
+├── session.py     conversation state, persistence, heartbeat wiring
 ├── events.py      the event stream interfaces consume
 ├── config.py      defaults → config.toml → environment → flags
 ├── prompts.py     system prompts, split so the cached prefix stays stable
-├── memory.py      MongoDB: facts, transcripts, reminders
-├── reminders.py   "tomorrow at 9am" → a datetime, and the scheduler thread
+├── memory.py      MongoDB: facts, transcripts, reminders, notices, schedule
+├── reminders.py   "tomorrow at 9am" → a datetime, and the reminder sweep
+├── heartbeat.py   the background loop: scheduled checks, quiet hours, notices
+├── guard.py       untrusted content, and spotting outward-facing actions
+├── audit.py       the append-only trail, and the cost tally
 ├── tasks.py       background sub-agent tasks
 ├── toolkit.py     which tools an agent gets
-├── tools/         files, shell, memory, reminders, web, delegation
+├── tools/         files, shell, memory, reminders, notices, web, delegation
 ├── cli.py         terminal REPL
 ├── voice/         wake word → speech-to-text → agent → speech
 └── web/           FastAPI + WebSocket, single-page UI
@@ -227,7 +333,7 @@ ruff check src tests
 ```
 
 An autouse fixture replaces the Mongo client for the whole suite, so no test
-can reach a real server even by accident. 109 tests, about three seconds.
+can reach a real server even by accident. 182 tests, about five seconds.
 
 ## License
 

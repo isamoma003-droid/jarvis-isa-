@@ -84,6 +84,22 @@ class ReminderFired(Event):
 
 
 @dataclass(slots=True)
+class NoticeSurfaced(Event):
+    """The heartbeat decided something is worth the user's attention.
+
+    Distinct from `Notice`, which is running commentary inside a turn. This one
+    is durable, carries an id, and stays in the inbox until it is dismissed.
+    """
+
+    notice_id: int
+    text: str
+    level: str = "quiet"
+    source: str = "jarvis"
+    detail: str = ""
+    kind: str = field(init=False, default="surfaced")
+
+
+@dataclass(slots=True)
 class TurnFinished(Event):
     """The agent finished a turn.
 

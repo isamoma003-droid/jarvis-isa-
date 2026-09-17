@@ -12,6 +12,7 @@ from ..errors import ApprovalDenied, SandboxViolation
 from ..events import Event
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
+    from ..audit import AuditLog
     from ..config import JarvisConfig
     from ..memory import MongoStore
     from ..tasks import TaskRegistry
@@ -37,6 +38,11 @@ class ToolContext:
     emit: Callable[[Event], None] = lambda event: None
     confirm: Callable[[str, str], bool] | None = None
     depth: int = 0
+    audit: AuditLog | None = None
+    # True when nothing with a human attached is driving this - a background
+    # sub-agent, or a heartbeat-initiated action. Nothing here may block on an
+    # answer that is never coming.
+    unattended: bool = False
     _queue: deque[Event] = field(default_factory=deque, repr=False)
 
     def post(self, event: Event) -> None:
@@ -77,23 +83,62 @@ class ToolContext:
         except ValueError:
             return str(path)
 
+    # -- notices -------------------------------------------------------
+    def notify(self, text: str, detail: str = "", level: str = "quiet") -> None:
+        """Leave a note in the inbox. Never raises - a note is never the point."""
+        try:
+            self.store.add_notice(source="jarvis", text=text, detail=detail, level=level)
+        except Exception:
+            pass
+
     # -- approval ------------------------------------------------------
-    def approve(self, action: str, detail: str) -> None:
-        """Gate a side effect. Raises ApprovalDenied when the answer is no."""
+    def approve(self, action: str, detail: str, outward: bool = False) -> None:
+        """Gate a side effect. Raises ApprovalDenied when the answer is no.
+
+        This sits between the model choosing a tool and the tool running, so it
+        covers typed, spoken and heartbeat-initiated actions identically.
+
+        `outward` marks an action that reaches another person or another machine.
+        Those ask **every time**: not waived by `approval = "auto"`, and never
+        pre-authorised by a previous yes. Confirmation is per action and does not
+        generalise.
+        """
         policy = self.config.approval
-        if policy == "auto":
-            return
+        must_ask = outward and self.config.confirm_outward
+
+        def refuse(reason: str, why: str) -> None:
+            if self.audit is not None:
+                self.audit.approval(action, detail, granted=False, why=why)
+            raise ApprovalDenied(reason)
+
         if policy == "deny":
-            raise ApprovalDenied(
+            refuse(
                 f"{action} needs approval and the approval policy is 'deny'. "
-                "Tell the user what you wanted to run and why."
+                "Tell the user what you wanted to run and why.",
+                "policy is deny",
             )
-        if self.confirm is None:
-            raise ApprovalDenied(
-                f"{action} needs approval but this interface cannot ask. "
-                "Set JARVIS_APPROVAL=auto to allow it, or run it from the terminal."
+        if policy == "auto" and not must_ask:
+            if self.audit is not None:
+                self.audit.approval(action, detail, granted=True, why="approval policy is auto")
+            return
+        if self.unattended or self.confirm is None:
+            # The safe default when there is nobody to ask: do nothing, and leave
+            # a note. A background loop that blocks on an absent human stops
+            # quietly, and you find out weeks later.
+            note = "outward-facing action" if must_ask else "action needing approval"
+            self.notify(
+                f"held back: wanted to {action}",
+                f"{detail}\n\nNot done - no one was available to approve this {note}.",
             )
-        if not self.confirm(action, detail):
+            refuse(
+                f"{action} needs your approval and nobody is attached to ask. "
+                "Nothing was done; a note is waiting in the inbox.",
+                "unattended",
+            )
+        granted = bool(self.confirm(action, detail))
+        if self.audit is not None:
+            self.audit.approval(action, detail, granted=granted, why="asked" if granted else "")
+        if not granted:
             raise ApprovalDenied(f"the user declined: {action}")
 
 
@@ -106,6 +151,12 @@ class Tool:
     input_schema: dict[str, Any]
     handler: Callable[[ToolContext, dict[str, Any]], str]
     dangerous: bool = False
+    # Reaches another person or another machine. Always confirmed, whatever the
+    # approval policy says. See AGENT.md, "What it must never do without asking".
+    outward: bool = False
+    # The result carries content from outside - a file, a page, a command's
+    # output. The loop wraps these so the model treats them as data.
+    untrusted: bool = False
 
     def api_dict(self) -> dict[str, Any]:
         return {

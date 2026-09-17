@@ -11,6 +11,9 @@ const empty = document.getElementById("empty");
 const approvalModal = document.getElementById("approval-modal");
 const toasts = document.getElementById("toasts");
 const reactor = document.getElementById("reactor");
+const holdButton = document.getElementById("hold");
+const noticesButton = document.getElementById("notices-button");
+const noticesCount = document.getElementById("notices-count");
 
 const tele = {
   uptime: document.getElementById("tele-uptime"),
@@ -18,6 +21,7 @@ const tele = {
   out: document.getElementById("tele-out"),
   cache: document.getElementById("tele-cache"),
   tools: document.getElementById("tele-tools"),
+  notices: document.getElementById("tele-notices"),
   state: document.getElementById("tele-state"),
 };
 
@@ -27,6 +31,8 @@ let current = null;      // the assistant message being built
 let pendingApproval = null;
 let retryDelay = 500;
 const counters = { in: 0, out: 0, cache: 0, tools: 0 };
+let waiting = 0;   // open notices
+let paused = false;
 const startedAt = Date.now();
 
 /* ---------- reactor + telemetry ---------- */
@@ -251,6 +257,51 @@ function answerApproval(allow) {
   approvalModal.classList.add("hidden");
 }
 
+function setWaiting(count) {
+  waiting = Math.max(0, count);
+  tele.notices.textContent = waiting;
+  noticesCount.textContent = waiting;
+  noticesCount.classList.toggle("hidden", waiting === 0);
+}
+
+function setPaused(state) {
+  paused = state;
+  holdButton.textContent = paused ? "held" : "hold";
+  holdButton.classList.toggle("active", paused);
+  holdButton.title = paused
+    ? "Proactive behaviour is held. Click to resume."
+    : "Kill switch: hold all proactive behaviour";
+}
+
+/* Anything the heartbeat surfaces. Dismissible, because an inbox you cannot
+   empty is clutter you learn to ignore. */
+function surfaced(event) {
+  finishMessage();
+  const block = addBlock(`notice surfaced ${event.level}`, "");
+  const title = document.createElement("span");
+  title.className = "label";
+  title.textContent = event.source;
+  const body = document.createElement("div");
+  body.textContent = event.text;
+  const clear = document.createElement("button");
+  clear.className = "dismiss";
+  clear.textContent = "dismiss";
+  clear.onclick = () => {
+    send({ type: "dismiss", id: event.notice_id });
+    block.classList.add("dismissed");
+    clear.remove();
+  };
+  block.append(title, body, clear);
+  if (event.detail) {
+    const detail = document.createElement("pre");
+    detail.className = "detail";
+    detail.textContent = event.detail;
+    block.append(detail);
+  }
+  setWaiting(waiting + 1);
+  if (event.level !== "quiet") toast(event.source, event.text);
+}
+
 function toast(label, text, ms = 20000) {
   const node = document.createElement("div");
   node.className = "toast";
@@ -282,6 +333,8 @@ function handle(event) {
       document.getElementById("model").textContent = event.model;
       document.getElementById("workspace").textContent = event.workspace;
       document.getElementById("readout-approval").textContent = event.approval;
+      setPaused(Boolean(event.paused));
+      setWaiting(event.waiting || 0);
       break;
     case "text":
       setState("speaking");
@@ -314,6 +367,28 @@ function handle(event) {
       break;
     case "approval_request":
       askApproval(event);
+      break;
+    case "surfaced":
+      surfaced(event);
+      break;
+    case "paused":
+      setPaused(Boolean(event.paused));
+      addBlock("notice warn", event.paused
+        ? "proactive behaviour held — checks and reminders will not fire"
+        : "proactive behaviour resumed");
+      break;
+    case "dismissed":
+      setWaiting(event.id === "all" ? 0 : waiting - (event.count || 0));
+      break;
+    case "notices":
+      finishMessage();
+      setWaiting(event.notices.length);
+      if (!event.notices.length) {
+        addBlock("notice", "inbox empty");
+      } else {
+        event.notices.forEach((notice) => surfaced({ ...notice, notice_id: notice.id }));
+        setWaiting(event.notices.length);
+      }
       break;
     case "turn_finished":
       finishMessage();
@@ -377,6 +452,12 @@ input.addEventListener("input", () => {
 
 sendButton.addEventListener("click", submit);
 stopButton.addEventListener("click", () => send({ type: "interrupt" }));
+holdButton.addEventListener("click", () => send({ type: "pause", paused: !paused }));
+noticesButton.addEventListener("click", () => {
+  thread.querySelectorAll(".notice.surfaced").forEach((n) => n.remove());
+  send({ type: "notices" });
+});
+
 resetButton.addEventListener("click", () => {
   send({ type: "reset" });
   thread.querySelectorAll(".msg, .tool, .notice, .usage, .error-line").forEach((n) => n.remove());

@@ -72,10 +72,10 @@ def test_a_reminder_reaches_the_interface(config, store):
     store.add_reminder("drink water", utcnow())
 
     with Session(config, interface="cli", client=client, store=store) as session:
-        session.start_reminders(delivered.append)
-        # stop the polling thread, then fire deterministically
-        session.scheduler.stop()
-        session.scheduler.tick()
+        heartbeat = session.start_heartbeat(delivered.append)
+        # stop the polling thread, then beat once deterministically
+        heartbeat.stop()
+        heartbeat.tick()
 
     assert [e.text for e in delivered if isinstance(e, ReminderFired)] == ["drink water"]
 

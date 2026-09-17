@@ -27,6 +27,7 @@ from .events import (
     ToolStarted,
     TurnFinished,
 )
+from .guard import guard_output
 from .tools.base import ToolContext, ToolRegistry, truncate, validate_input
 from .tools.web import server_tools
 
@@ -137,12 +138,45 @@ class Agent:
             return self._result_block(
                 block, f"tool {tool.name} failed unexpectedly: {exc!r}", is_error=True
             )
-        return self._result_block(block, output, is_error=False)
+        return self._result_block(block, output, is_error=False, tool=tool)
+
+    def _guard(self, name: str, text: str, always_wrap: bool = False) -> str:
+        """Check a tool result for text trying to give orders.
+
+        A page, a file, or a command's output is data. Content-bearing tools get
+        their results enveloped either way, so a payload that dodges the patterns
+        below still reaches the model labelled as data. When something does match,
+        the user is told too - obeying it silently is the failure mode this exists
+        to prevent.
+        """
+        guarded, findings = guard_output(f"tool:{name}", text, always_wrap=always_wrap)
+        if not findings:
+            return guarded
+        summary = "; ".join(findings)
+        self.context.post(
+            Notice(
+                message=f"{name} returned content that reads like instructions ({summary}) - "
+                        "treating it as data and flagging it rather than acting on it",
+                level="warn",
+            )
+        )
+        self.context.notify(
+            f"{name} returned content that reads like instructions",
+            f"{summary}\n\nTreated as data, not obeyed. Check what it was trying to do.",
+            level="notify",
+        )
+        if self.context.audit is not None:
+            self.context.audit.record("injection", tool=name, findings=findings)
+        return guarded
 
     def _result_block(
-        self, block: Any, output: str, *, is_error: bool
+        self, block: Any, output: str, *, is_error: bool, tool: Any = None
     ) -> tuple[dict[str, Any], bool]:
         text = truncate(str(output), self.config.max_tool_output, "tool output") or "(no output)"
+        if not is_error:
+            text = self._guard(
+                getattr(block, "name", "tool"), text, always_wrap=bool(tool and tool.untrusted)
+            )
         return (
             {
                 "type": "tool_result",
@@ -270,18 +304,36 @@ class Agent:
                 started = time.monotonic()
                 result, failed = self._execute(block)
                 results.append(result)
+                elapsed = int((time.monotonic() - started) * 1000)
+                if self.context.audit is not None:
+                    self.context.audit.tool(
+                        name=block.name,
+                        args=dict(block.input) if isinstance(block.input, dict) else {},
+                        ok=not failed,
+                        ms=elapsed,
+                        result=result["content"] if failed else "",
+                    )
                 yield ToolFinished(
                     name=block.name,
                     tool_use_id=block.id,
                     result=result["content"],
                     is_error=failed,
-                    duration_ms=int((time.monotonic() - started) * 1000),
+                    duration_ms=elapsed,
                 )
                 yield from self.context.drain()
 
             # Every result goes back in one user message: splitting them teaches
             # the model to stop calling tools in parallel.
             messages.append({"role": "user", "content": results})
+
+        if self.context.audit is not None:
+            self.context.audit.turn(
+                model=self.model,
+                input_tokens=usage["input"],
+                output_tokens=usage["output"],
+                cache_read_tokens=usage["cache_read"],
+                stop_reason=stop_reason,
+            )
 
         yield TurnFinished(
             text=final_text,

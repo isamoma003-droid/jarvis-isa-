@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .config import JarvisConfig
-from .tools import files, memory_tools, reminder_tools, shell, subagents
+from .tools import files, memory_tools, notice_tools, reminder_tools, shell, subagents
 from .tools.base import ToolRegistry
 
 ALL_TOOLS = [
@@ -13,6 +13,7 @@ ALL_TOOLS = [
     *shell.TOOLS,
     *memory_tools.TOOLS,
     *reminder_tools.TOOLS,
+    *notice_tools.TOOLS,
     *subagents.TOOLS,
 ]
 

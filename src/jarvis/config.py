@@ -6,6 +6,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from typing import Any
 
 from .errors import ConfigError
 from .memory import DEFAULT_DB, DEFAULT_URI
@@ -88,9 +89,18 @@ class JarvisConfig:
     max_tool_output: int = 20000
     max_depth: int = 2
     max_iterations: int = 40
+    # Outward-facing actions ask every time, whatever `approval` says. Turning
+    # this off is a deliberate choice, not a default anyone drifts into.
+    confirm_outward: bool = True
+    audit: bool = True
 
     # --- reminders ---
     reminder_poll_seconds: int = 20
+
+    # --- the heartbeat ---
+    heartbeat_seconds: int = 60
+    quiet_hours: str = "22:00-07:00"
+    checks: list[dict[str, Any]] = field(default_factory=list)
 
     # --- voice ---
     wake_word: str = "jarvis"
@@ -120,6 +130,17 @@ class JarvisConfig:
             raise ConfigError("max_depth cannot be negative")
         if self.max_iterations < 1:
             raise ConfigError("max_iterations must be at least 1")
+        if self.heartbeat_seconds < 1:
+            raise ConfigError("heartbeat_seconds must be at least 1")
+        # Validate the heartbeat settings here, at load, rather than letting a
+        # typo in the config file surface as a dead background thread hours later.
+        from .heartbeat import CheckError, load_checks, parse_quiet_hours
+
+        try:
+            parse_quiet_hours(self.quiet_hours)
+            load_checks(self.checks)
+        except CheckError as exc:
+            raise ConfigError(str(exc)) from exc
 
     @property
     def worker_model(self) -> str:
@@ -164,6 +185,7 @@ class JarvisConfig:
             "stt_model": "JARVIS_STT_MODEL",
             "tts_backend": "JARVIS_TTS_BACKEND",
             "web_host": "JARVIS_WEB_HOST",
+            "quiet_hours": "JARVIS_QUIET_HOURS",
         }
         for key, env_name in env_map.items():
             raw = os.environ.get(env_name)
@@ -185,6 +207,7 @@ class JarvisConfig:
             "max_depth": "JARVIS_MAX_DEPTH",
             "max_iterations": "JARVIS_MAX_ITERATIONS",
             "reminder_poll_seconds": "JARVIS_REMINDER_POLL_SECONDS",
+            "heartbeat_seconds": "JARVIS_HEARTBEAT_SECONDS",
             "web_port": "JARVIS_WEB_PORT",
         }
         for key, env_name in int_map.items():
@@ -195,6 +218,8 @@ class JarvisConfig:
             "thinking": "JARVIS_THINKING",
             "refusal_fallbacks": "JARVIS_REFUSAL_FALLBACKS",
             "web_tools": "JARVIS_WEB_TOOLS",
+            "audit": "JARVIS_AUDIT",
+            "confirm_outward": "JARVIS_CONFIRM_OUTWARD",
         }
         for key, env_name in bool_map.items():
             if env_name in os.environ:

@@ -663,3 +663,72 @@ textarea::placeholder { color: #3f6478; font-style: italic; }
   }
   .scan::after, .grid { display: none; }
 }
+
+
+/* ---------- surfaced notices, inbox, kill switch ---------- */
+/* The heartbeat's output. Cyan for the ordinary case, amber when it decided to
+   interrupt, red for urgent - the chrome carries the level so the body text
+   stays readable. */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.badge {
+  display: inline-block;
+  min-width: 17px;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--cyan, #4fd8ff);
+  color: #04121b;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 17px;
+  text-align: center;
+}
+button.active {
+  border-color: var(--gold, #ffb638);
+  color: var(--gold, #ffb638);
+  box-shadow: 0 0 18px rgba(255, 182, 56, 0.3);
+}
+.notice.surfaced {
+  position: relative;
+  margin: 10px 0;
+  padding: 11px 14px;
+  border-left: 3px solid var(--cyan, #4fd8ff);
+  background: rgba(14, 24, 34, 0.7);
+}
+.notice.surfaced.notify { border-left-color: var(--gold, #ffb638); }
+.notice.surfaced.urgent { border-left-color: #ff6b6b; }
+.notice.surfaced.dismissed { opacity: 0.4; }
+.notice.surfaced .label {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.66;
+}
+.notice.surfaced .detail {
+  margin: 7px 0 0;
+  max-height: 8.5em;
+  overflow: auto;
+  font-size: 12px;
+  opacity: 0.72;
+  white-space: pre-wrap;
+}
+.notice.surfaced .dismiss {
+  position: absolute;
+  top: 8px;
+  right: 9px;
+  padding: 2px 9px;
+  border: 1px solid currentColor;
+  background: none;
+  color: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  opacity: 0.55;
+  cursor: pointer;
+}
+.notice.surfaced .dismiss:hover { opacity: 1; }

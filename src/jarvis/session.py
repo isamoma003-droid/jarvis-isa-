@@ -12,12 +12,13 @@ from typing import Any
 import anthropic
 
 from .agent import Agent
+from .audit import AuditLog, audit_enabled, default_path
 from .config import NO_CREDENTIALS, JarvisConfig, credentials_available
 from .errors import ConfigError
-from .events import Event, ReminderFired, TurnFinished
-from .memory import MongoStore, Reminder
+from .events import Event, TurnFinished
+from .heartbeat import Heartbeat, as_event
+from .memory import MongoStore, Notice
 from .prompts import system_blocks
-from .reminders import ReminderScheduler
 from .tasks import TaskRegistry
 from .toolkit import build_registry
 from .tools.base import ToolContext
@@ -53,6 +54,15 @@ class Session:
         self.messages: list[dict[str, Any]] = []
         self.session_id = self.store.create_session(interface=interface)
 
+        self.audit = AuditLog(
+            default_path(config.data_dir),
+            session_id=self.session_id,
+            enabled=config.audit and audit_enabled(),
+        )
+        self.audit.record("session", interface=interface, model=config.model, workspace=str(
+            config.workspace
+        ))
+
         owner_name = owner or self._remembered_owner()
         self.context = ToolContext(
             config=config,
@@ -60,6 +70,7 @@ class Session:
             client=self.client,
             tasks=self.tasks,
             confirm=confirm,
+            audit=self.audit,
         )
         self.registry = build_registry(config)
         self.agent = Agent(
@@ -69,7 +80,7 @@ class Session:
             context=self.context,
             system=system_blocks(config, self.store, interface, owner_name),
         )
-        self.scheduler: ReminderScheduler | None = None
+        self.heartbeat: Heartbeat | None = None
 
     def _remembered_owner(self) -> str:
         for fact in self.store.recall("name", limit=5):
@@ -101,26 +112,59 @@ class Session:
         self.messages = []
         self.session_id = self.store.create_session(interface=self.interface)
 
-    # -- reminders -----------------------------------------------------
-    def start_reminders(self, on_fire: Callable[[Event], None]) -> None:
-        """Run the scheduler, delivering fired reminders as events."""
-        def deliver(reminder: Reminder) -> None:
-            on_fire(
-                ReminderFired(
-                    reminder_id=reminder.id, text=reminder.text, due_at=reminder.due_at
-                )
-            )
+    # -- the heartbeat -------------------------------------------------
+    def start_heartbeat(self, on_event: Callable[[Event], None] | None = None) -> Heartbeat:
+        """Start the background loop, delivering anything it surfaces as events.
 
-        self.scheduler = ReminderScheduler(
-            self.store, deliver, poll_seconds=self.config.reminder_poll_seconds
-        )
-        self.scheduler.start()
+        Without a listener the loop still runs - it just holds everything it
+        raises for whoever attaches next.
+        """
+        self.heartbeat = Heartbeat(self.config, self.store, on_event, audit=self.audit)
+        self.heartbeat.start()
+        return self.heartbeat
+
+    # The old name, kept so existing interfaces and tests keep working.
+    start_reminders = start_heartbeat
+
+    def catch_up(self) -> list[Event]:
+        """Everything raised while nobody was attached, for showing on return.
+
+        Only what earned an interruption comes back this way. Quiet notices stay
+        in the inbox for `/notices` - showing the lot on every startup is how a
+        proactive assistant turns into noise you learn to skip.
+        """
+        held = [
+            notice
+            for notice in self.store.pending_notices(limit=50)
+            if notice.level in {"notify", "urgent"}
+        ]
+        if not held:
+            return []
+        self.store.mark_delivered([notice.id for notice in held])
+        return [as_event(notice) for notice in held]
+
+    def open_notices(self, limit: int = 50) -> list[Notice]:
+        """The inbox: everything surfaced and not yet dismissed."""
+        return self.store.open_notices(limit=limit)
+
+    # -- the kill switch -----------------------------------------------
+    @property
+    def paused(self) -> bool:
+        return self.store.is_paused()
+
+    def set_paused(self, paused: bool) -> None:
+        """Stop or resume all proactive behaviour. The conversation is unaffected."""
+        self.store.set_paused(paused)
+        self.audit.record("kill_switch", paused=paused)
 
     # -- lifecycle -----------------------------------------------------
     def close(self) -> None:
-        if self.scheduler:
-            self.scheduler.stop()
+        if self.heartbeat:
+            # Detach first: anything raised on the way out is held, not dropped.
+            self.heartbeat.detach()
+            self.heartbeat.stop()
         self.tasks.shutdown()
+        self.audit.record("session_end", **self.audit.totals.as_dict())
         if self._owns_store:
             self.store.close()
 

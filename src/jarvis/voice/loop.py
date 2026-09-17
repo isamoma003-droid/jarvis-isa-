@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.markup import escape
 
 from ..config import JarvisConfig
-from ..events import ErrorEvent, ReminderFired, ToolStarted, TurnFinished
+from ..events import ErrorEvent, NoticeSurfaced, ReminderFired, ToolStarted, TurnFinished
 from ..session import Session
 from .audio import Recording, calibrate, record_utterance, wait_for_quiet
 from .stt import load_stt
@@ -110,9 +110,13 @@ class VoiceLoop:
                 answer_text = event.text or answer_text
         self.say(answer_text or "I don't have an answer for that.")
 
-    def on_reminder(self, event: Any) -> None:
+    def on_surfaced(self, event: Any) -> None:
+        """What the heartbeat pushes, said out loud."""
         if isinstance(event, ReminderFired):
             self.say(f"Reminder: {event.text}")
+        elif isinstance(event, NoticeSurfaced):
+            lead = "Something urgent" if event.level == "urgent" else "Worth knowing"
+            self.say(f"{lead}: {event.text}")
 
     # -- the loop ------------------------------------------------------
     def run(self, once: bool = False) -> int:
@@ -131,7 +135,9 @@ class VoiceLoop:
             console.print(f"[yellow]could not calibrate ({exc}); using a default gate[/yellow]")
         console.print("[dim]ready - Ctrl-C to stop[/dim]\n")
 
-        self.session.start_reminders(self.on_reminder)
+        self.session.start_heartbeat(self.on_surfaced)
+        for held in self.session.catch_up():
+            self.on_surfaced(held)
 
         try:
             while True:

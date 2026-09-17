@@ -124,8 +124,14 @@ def test_prompt_policy_without_a_way_to_ask_refuses(context, workspace):
     context.config.approval = "prompt"
     context.confirm = None
 
-    with pytest.raises(ApprovalDenied, match="cannot ask"):
+    with pytest.raises(ApprovalDenied, match="nobody is attached to ask"):
         files.write_file(context, {"path": "new.txt", "content": "hi"})
+    assert not (workspace / "new.txt").exists()
+    # The safe default is to do nothing and say so, not to hang on an answer
+    # that is never coming.
+    held = context.store.open_notices()
+    assert len(held) == 1
+    assert "wanted to create file" in held[0].text
 
 
 # --- shell -----------------------------------------------------------

@@ -58,7 +58,13 @@
     </div>
   </div>
 
-  <button id="reset" title="Start a fresh conversation">purge</button>
+  <div class="header-actions">
+    <button id="notices-button" class="ghost" title="What Jarvis surfaced on its own">
+      inbox <span id="notices-count" class="badge hidden">0</span>
+    </button>
+    <button id="hold" class="ghost" title="Kill switch: hold all proactive behaviour">hold</button>
+    <button id="reset" title="Start a fresh conversation">purge</button>
+  </div>
 </header>
 
 <main class="stage">
@@ -100,6 +106,10 @@
     <div class="tele-block">
       <span class="key">tools run</span>
       <span class="val" id="tele-tools">0</span>
+    </div>
+    <div class="tele-block">
+      <span class="key">inbox</span>
+      <span class="val" id="tele-notices">0</span>
     </div>
     <div class="tele-block state">
       <span class="key">state</span>
