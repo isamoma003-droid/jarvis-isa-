@@ -68,6 +68,25 @@ In-REPL commands: `/help`, `/tools`, `/memory`, `/tasks`, `/reminders`,
 `/new`, `/approve <auto|prompt|deny>`, `/exit`. Ctrl-C stops the current turn;
 Ctrl-D exits.
 
+### The HUD
+
+`jarvis web` serves a J.A.R.V.I.S. interface, not a chat box:
+
+- an **arc reactor** that shifts colour and tempo with what Jarvis is doing —
+  cyan idle, faster when thinking, amber while a tool runs, red on a fault,
+  dimmed when the socket drops;
+- a **telemetry rail** — session clock, tokens in and out, cached tokens,
+  tools run, current state;
+- **gold authorisation dialogs** for anything that needs your approval, with
+  the exact command shown before you allow it;
+- concentric rings and a slow radar sweep behind the conversation, scanlines
+  over it, and a short boot sequence on load.
+
+Readable first: the chrome glows, the body text doesn't — a HUD you can't
+read a stack trace in is a failed HUD. It respects `prefers-reduced-motion`
+(every animation here is decoration, never a barrier) and collapses to one
+column on a phone.
+
 ## What it can do
 
 | Group | Tools |

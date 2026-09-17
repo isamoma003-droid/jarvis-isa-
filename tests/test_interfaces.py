@@ -108,7 +108,10 @@ def test_web_health_and_page(web_client):
     holder["client"] = FakeClient([])
 
     assert client.get("/api/health").json()["model"] == "claude-opus-5"
-    assert "JARVIS" in client.get("/").text
+
+    page = client.get("/").text
+    assert "J.A.R.V.I.S." in page
+    assert "/static/app.js" in page and "/static/style.css" in page
 
 
 def test_web_socket_streams_a_turn(web_client):
@@ -220,3 +223,22 @@ def test_markup_in_tool_output_is_not_interpreted(capsys):
     printed = capsys.readouterr().out
     assert "[bold]x[/]" in printed
     assert "[/not a tag]" in printed
+
+
+def test_page_ids_are_unique_and_every_script_target_exists():
+    """A duplicate id once pointed the approval modal at the header readout,
+    so the browser never showed the dialog. Catch that class of bug here."""
+    import re
+
+    from jarvis.web.server import STATIC
+
+    html = (STATIC / "index.html").read_text()
+    script = (STATIC / "app.js").read_text()
+
+    ids = re.findall(r'id="([^"]+)"', html)
+    duplicates = {name for name in ids if ids.count(name) > 1}
+    assert not duplicates, f"duplicate element ids: {duplicates}"
+
+    wanted = set(re.findall(r'getElementById\("([^"]+)"\)', script))
+    missing = wanted - set(ids)
+    assert not missing, f"app.js reaches for elements that do not exist: {missing}"

@@ -1,4 +1,4 @@
-/* Jarvis web client: one WebSocket, the same event stream every face consumes. */
+/* J.A.R.V.I.S. web client: one WebSocket, the same event stream every face consumes. */
 
 const thread = document.getElementById("thread");
 const input = document.getElementById("input");
@@ -6,15 +6,86 @@ const sendButton = document.getElementById("send");
 const stopButton = document.getElementById("stop");
 const resetButton = document.getElementById("reset");
 const statusDot = document.getElementById("status");
+const linkText = document.getElementById("link-text");
 const empty = document.getElementById("empty");
-const approvalModal = document.getElementById("approval");
+const approvalModal = document.getElementById("approval-modal");
 const toasts = document.getElementById("toasts");
+const reactor = document.getElementById("reactor");
+
+const tele = {
+  uptime: document.getElementById("tele-uptime"),
+  in: document.getElementById("tele-in"),
+  out: document.getElementById("tele-out"),
+  cache: document.getElementById("tele-cache"),
+  tools: document.getElementById("tele-tools"),
+  state: document.getElementById("tele-state"),
+};
 
 let socket = null;
 let streaming = false;
 let current = null;      // the assistant message being built
 let pendingApproval = null;
 let retryDelay = 500;
+const counters = { in: 0, out: 0, cache: 0, tools: 0 };
+const startedAt = Date.now();
+
+/* ---------- reactor + telemetry ---------- */
+
+const STATE_LABELS = {
+  offline: "offline",
+  idle: "standby",
+  thinking: "processing",
+  tool: "executing",
+  speaking: "responding",
+  error: "fault",
+};
+
+function setState(state) {
+  reactor.dataset.state = state;
+  tele.state.textContent = STATE_LABELS[state] || state;
+}
+
+function bumpCounters({ input_tokens = 0, output_tokens = 0, cache_read_tokens = 0 }) {
+  counters.in += input_tokens;
+  counters.out += output_tokens;
+  counters.cache += cache_read_tokens;
+  tele.in.textContent = counters.in.toLocaleString();
+  tele.out.textContent = counters.out.toLocaleString();
+  tele.cache.textContent = counters.cache.toLocaleString();
+}
+
+setInterval(() => {
+  const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+  const minutes = String(Math.floor(elapsed / 60)).padStart(2, "0");
+  const seconds = String(elapsed % 60).padStart(2, "0");
+  tele.uptime.textContent = `${minutes}:${seconds}`;
+}, 1000);
+
+/* ---------- boot ---------- */
+
+function boot() {
+  const bootEl = document.getElementById("boot");
+  const log = document.getElementById("boot-log");
+  const lines = [
+    "J.A.R.V.I.S.  interface mark I",
+    "initialising display ......... ok",
+    "opening channel .............. ok",
+    "agent core ................... online",
+  ];
+  let index = 0;
+
+  const timer = setInterval(() => {
+    log.textContent += (index ? "\n" : "") + lines[index];
+    index += 1;
+    if (index >= lines.length) {
+      clearInterval(timer);
+      setTimeout(() => bootEl.classList.add("done"), 380);
+    }
+  }, 190);
+
+  // Never let the flourish trap anyone in it.
+  setTimeout(() => bootEl.classList.add("done"), 3000);
+}
 
 /* ---------- rendering helpers ---------- */
 
@@ -62,7 +133,7 @@ function addMessage(role, text = "") {
   wrapper.className = `msg ${role}`;
   const who = document.createElement("div");
   who.className = "who";
-  who.textContent = role === "user" ? "you" : "jarvis";
+  who.textContent = role === "user" ? "sir" : "jarvis";
   const body = document.createElement("div");
   body.className = "body";
   if (role === "user") body.textContent = text;
@@ -135,7 +206,7 @@ function toolStarted(event) {
   node.className = "tool running";
   node.innerHTML = `
     <summary>
-      <span class="icon">&#9672;</span>
+      <span class="icon">&#9673;</span>
       <span class="name"></span>
       <span class="args"></span>
       <span class="ms"></span>
@@ -144,6 +215,8 @@ function toolStarted(event) {
   node.querySelector(".args").textContent = describeArgs(event.input);
   thread.append(node);
   openTools.set(event.tool_use_id || event.name, node);
+  counters.tools += 1;
+  tele.tools.textContent = counters.tools;
   scroll();
 }
 
@@ -153,7 +226,7 @@ function toolFinished(event) {
   openTools.delete(event.tool_use_id || event.name);
   node.classList.remove("running");
   if (event.is_error) node.classList.add("error");
-  node.querySelector(".icon").textContent = event.is_error ? "✗" : "✓";
+  node.querySelector(".icon").textContent = event.is_error ? "✕" : "✓";
   node.querySelector(".ms").textContent = event.duration_ms ? `${event.duration_ms}ms` : "";
   const output = document.createElement("pre");
   output.textContent = event.result || "(no output)";
@@ -169,6 +242,7 @@ function askApproval(event) {
   document.getElementById("approval-action").textContent = event.action;
   document.getElementById("approval-detail").textContent = event.detail;
   approvalModal.classList.remove("hidden");
+  document.getElementById("allow").focus();
 }
 
 function answerApproval(allow) {
@@ -207,12 +281,23 @@ function handle(event) {
     case "ready":
       document.getElementById("model").textContent = event.model;
       document.getElementById("workspace").textContent = event.workspace;
-      document.getElementById("approval").textContent = `approval: ${event.approval}`;
+      document.getElementById("readout-approval").textContent = event.approval;
       break;
-    case "text": appendText(event.text); break;
-    case "thinking": appendThinking(event.text); break;
-    case "tool_started": toolStarted(event); break;
-    case "tool_finished": toolFinished(event); break;
+    case "text":
+      setState("speaking");
+      appendText(event.text);
+      break;
+    case "thinking":
+      setState("thinking");
+      appendThinking(event.text);
+      break;
+    case "tool_started":
+      setState("tool");
+      toolStarted(event);
+      break;
+    case "tool_finished":
+      toolFinished(event);
+      break;
     case "notice":
       finishMessage();
       addBlock(`notice ${event.level || "info"}`, event.message);
@@ -220,19 +305,24 @@ function handle(event) {
     case "reminder":
       toast("reminder", event.text);
       finishMessage();
-      addBlock("notice warn", `⏰ ${event.text}`);
+      addBlock("notice warn", `${event.text}`);
       break;
     case "error":
       finishMessage();
+      setState("error");
       addBlock("error-line", event.message);
       break;
-    case "approval_request": askApproval(event); break;
+    case "approval_request":
+      askApproval(event);
+      break;
     case "turn_finished":
       finishMessage();
       setStreaming(false);
+      setState(socket && socket.readyState === WebSocket.OPEN ? "idle" : "offline");
+      bumpCounters(event);
       if (event.output_tokens) {
-        const cached = event.cache_read_tokens ? `, ${event.cache_read_tokens} cached` : "";
-        addBlock("usage", `${event.input_tokens} in / ${event.output_tokens} out${cached}`);
+        const cached = event.cache_read_tokens ? ` · ${event.cache_read_tokens} cached` : "";
+        addBlock("usage", `${event.input_tokens} in · ${event.output_tokens} out${cached}`);
       }
       break;
   }
@@ -244,13 +334,15 @@ function connect() {
 
   socket.onopen = () => {
     retryDelay = 500;
-    statusDot.className = "status online";
-    statusDot.title = "connected";
+    statusDot.className = "dot online";
+    linkText.textContent = "online";
+    setState("idle");
   };
   socket.onmessage = (message) => handle(JSON.parse(message.data));
   socket.onclose = () => {
-    statusDot.className = "status offline";
-    statusDot.title = "reconnecting";
+    statusDot.className = "dot offline";
+    linkText.textContent = "reconnecting";
+    setState("offline");
     setStreaming(false);
     setTimeout(connect, retryDelay);
     retryDelay = Math.min(retryDelay * 2, 10000);
@@ -269,6 +361,7 @@ function submit() {
   input.value = "";
   input.style.height = "auto";
   setStreaming(true);
+  setState("thinking");
 }
 
 input.addEventListener("keydown", (event) => {
@@ -279,7 +372,7 @@ input.addEventListener("keydown", (event) => {
 });
 input.addEventListener("input", () => {
   input.style.height = "auto";
-  input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+  input.style.height = `${Math.min(input.scrollHeight, 190)}px`;
 });
 
 sendButton.addEventListener("click", submit);
@@ -296,4 +389,5 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && pendingApproval) answerApproval(false);
 });
 
+boot();
 connect();

@@ -3,54 +3,131 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Jarvis</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
+<title>J.A.R.V.I.S.</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='34' fill='none' stroke='%234fd8ff' stroke-width='6'/><circle cx='50' cy='50' r='14' fill='%237fe9ff'/></svg>">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header>
-  <div class="brand">
-    <span class="mark">◈</span>
-    <h1>JARVIS</h1>
+
+<!-- ambient layers -->
+<div class="layer grid" aria-hidden="true"></div>
+<div class="layer scan" aria-hidden="true"></div>
+<div class="layer halo" aria-hidden="true"></div>
+<div class="layer vignette" aria-hidden="true"></div>
+<div class="corner tl" aria-hidden="true"></div>
+<div class="corner tr" aria-hidden="true"></div>
+<div class="corner bl" aria-hidden="true"></div>
+<div class="corner br" aria-hidden="true"></div>
+
+<!-- boot sequence -->
+<div id="boot" class="boot" aria-hidden="true">
+  <div class="boot-inner">
+    <div class="boot-ring"><span></span><span></span><span></span></div>
+    <pre id="boot-log"></pre>
   </div>
-  <div class="meta">
-    <span id="model">—</span>
-    <span class="sep">·</span>
-    <span id="workspace" title="workspace">—</span>
-    <span class="sep">·</span>
-    <span id="approval">—</span>
+</div>
+
+<header class="hud-header">
+  <div class="reactor" id="reactor" data-state="offline">
+    <svg viewBox="0 0 120 120" class="reactor-svg" aria-hidden="true">
+      <circle class="r-ticks"  cx="60" cy="60" r="55"/>
+      <circle class="r-outer"  cx="60" cy="60" r="47"/>
+      <circle class="r-dashed" cx="60" cy="60" r="39"/>
+      <g class="r-arcs">
+        <path d="M60 28 A32 32 0 0 1 87.7 44"/>
+        <path d="M87.7 76 A32 32 0 0 1 32.3 76"/>
+        <path d="M32.3 44 A32 32 0 0 1 60 28"/>
+      </g>
+      <circle class="r-halo" cx="60" cy="60" r="22"/>
+      <circle class="r-core" cx="60" cy="60" r="13"/>
+    </svg>
   </div>
-  <div class="controls">
-    <span id="status" class="status offline" title="connection"></span>
-    <button id="reset" title="Start a fresh conversation">new</button>
+
+  <div class="identity">
+    <h1>J.A.R.V.I.S.</h1>
+    <p class="tagline">Just A Rather Very Intelligent System</p>
   </div>
+
+  <div class="readouts">
+    <div class="readout"><span class="key">model</span><span class="val" id="model">—</span></div>
+    <div class="readout"><span class="key">workspace</span><span class="val" id="workspace">—</span></div>
+    <div class="readout"><span class="key">approval</span><span class="val" id="readout-approval">—</span></div>
+    <div class="readout link-row">
+      <span class="key">link</span>
+      <span class="val"><i id="status" class="dot offline"></i><span id="link-text">offline</span></span>
+    </div>
+  </div>
+
+  <button id="reset" title="Start a fresh conversation">purge</button>
 </header>
 
-<main id="thread" aria-live="polite">
-  <div class="empty" id="empty">
-    <p class="empty-mark">◈</p>
-    <p>Ask for something. Files, shell, the web, your memory, reminders — or hand a
-       big job to a sub-agent and keep talking.</p>
-  </div>
+<main class="stage">
+  <aside class="rail" aria-hidden="true">
+    <div class="ticks"></div>
+  </aside>
+
+  <section class="panel">
+    <span class="br tl"></span><span class="br tr"></span>
+    <span class="br bl"></span><span class="br br-r"></span>
+
+    <div id="thread" aria-live="polite">
+      <div class="empty" id="empty">
+        <div class="empty-ring"></div>
+        <p class="empty-title">At your service</p>
+        <p>Files, shell, the web, your memory, reminders — or hand a
+           long job to Scout, Relay or Flux and keep talking.</p>
+      </div>
+    </div>
+  </section>
+
+  <aside class="rail telemetry">
+    <div class="tele-block">
+      <span class="key">session</span>
+      <span class="val" id="tele-uptime">00:00</span>
+    </div>
+    <div class="tele-block">
+      <span class="key">tokens in</span>
+      <span class="val" id="tele-in">0</span>
+    </div>
+    <div class="tele-block">
+      <span class="key">tokens out</span>
+      <span class="val" id="tele-out">0</span>
+    </div>
+    <div class="tele-block">
+      <span class="key">cached</span>
+      <span class="val" id="tele-cache">0</span>
+    </div>
+    <div class="tele-block">
+      <span class="key">tools run</span>
+      <span class="val" id="tele-tools">0</span>
+    </div>
+    <div class="tele-block state">
+      <span class="key">state</span>
+      <span class="val" id="tele-state">standby</span>
+    </div>
+  </aside>
 </main>
 
 <footer>
   <div class="composer">
-    <textarea id="input" rows="1" placeholder="Ask Jarvis…" autofocus></textarea>
-    <button id="send" title="Send (Enter)">send</button>
-    <button id="stop" class="hidden" title="Stop this turn">stop</button>
+    <span class="prompt-mark">&gt;</span>
+    <textarea id="input" rows="1" placeholder="Speak freely, sir." autofocus></textarea>
+    <button id="send" title="Send (Enter)">transmit</button>
+    <button id="stop" class="hidden" title="Stop this turn">abort</button>
   </div>
-  <p class="hint">Enter to send · Shift+Enter for a new line</p>
+  <p class="hint">enter to transmit · shift+enter for a new line</p>
 </footer>
 
-<div id="approval" class="modal hidden">
+<div id="approval-modal" class="modal hidden" role="dialog" aria-modal="true">
   <div class="modal-card">
-    <h2>Approval needed</h2>
+    <span class="br tl"></span><span class="br tr"></span>
+    <span class="br bl"></span><span class="br br-r"></span>
+    <h2>Authorisation required</h2>
     <p class="action" id="approval-action"></p>
     <pre class="detail" id="approval-detail"></pre>
     <div class="modal-actions">
       <button id="deny" class="ghost">deny</button>
-      <button id="allow">allow</button>
+      <button id="allow">authorise</button>
     </div>
   </div>
 </div>
