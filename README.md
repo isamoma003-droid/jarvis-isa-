@@ -9,11 +9,11 @@ Built on the Claude API (`claude-opus-5`) with a manual streaming tool-use loop.
 ```
                     ┌──────────────┐
   terminal ──┐      │              │──► files & shell (workspace-confined)
-  voice    ──┼─────►│  agent core  │──► web search & fetch (server-side)
-  web      ──┘      │              │──► memory (SQLite, survives restarts)
-                    └──────────────┘──► reminders (background scheduler)
+  voice    ──┼─────►│    Jarvis    │──► web search & fetch (server-side)
+  web      ──┘      │  agent core  │──► memory & reminders (MongoDB)
+                    └──────────────┘
                            │
-                           └──────────► sub-agents (delegated, parallel)
+                           └──────────► Scout · Relay · Flux sub-agents
 ```
 
 ## Install
@@ -29,9 +29,18 @@ pip install -e '.[voice]'     # + speech in/out
 pip install -e '.[all]'       # everything, plus test tooling
 ```
 
-Then set a key — `export ANTHROPIC_API_KEY=sk-ant-...`, or run `ant auth login`
-and Jarvis will pick the profile up. Copy `.env.example` if you want to pin
-other settings.
+Then point it at two things:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...        # or run `ant auth login`
+export MONGODB_URI='mongodb+srv://USER:PASSWORD@cluster0.xxxxx.mongodb.net/'
+```
+
+MongoDB holds everything Jarvis remembers. The [Atlas](https://www.mongodb.com/atlas)
+free M0 tier is plenty and means your memory follows you between your laptop,
+the VPS, and the phone PWA; `mongodb://localhost:27017` works too if you'd
+rather keep it on the machine. `jarvis doctor` will tell you whether it can
+reach the server. Copy `.env.example` to pin anything else.
 
 ## Use it
 
@@ -78,10 +87,15 @@ of flooding the conversation:
 
 | Agent | Gets | For |
 |---|---|---|
-| `researcher` | web + read-only files | look something up, report with sources |
-| `coder` | files + shell | make a change, run the checks, report |
-| `analyst` | read-only files + web | read a lot, reason, cite the evidence |
+| `scout` | web + read-only files | look something up, read a lot, report with sources |
+| `relay` | web + files | draft a message, reply, or summary for you to send |
+| `flux` | files + shell | make the change, run the checks, report what happened |
 | `general` | the usual set | anything else |
+
+Scout has no write access, so research can't quietly turn into edits. Relay
+drafts and saves — it **cannot send anything**; wiring it to real mail (the
+Gmail MCP in the architecture diagram) is still to do, and until then a human
+sends the draft.
 
 Set `background: true` and the task runs on a thread pool while the
 conversation continues; `check_task` collects the report. Delegation depth is
@@ -89,12 +103,30 @@ capped by `max_depth` (default 2) so sub-agents cannot recurse away.
 
 ### Memory and reminders
 
-Facts live in SQLite at `~/.jarvis/jarvis.db` and are injected into the system
-prompt at session start, so Jarvis opens already knowing what you told it last
-week. Reminders are checked by a background thread and fire into whichever
-interface is running — printed in the terminal, pushed over the WebSocket,
-spoken aloud in voice mode. One-shot or recurring (`daily`, `weekdays`,
-`every 30 minutes`).
+Everything durable lives in MongoDB — one database (`jarvis` by default) with
+four collections:
+
+| Collection | Holds |
+|---|---|
+| `facts` | what Jarvis knows about you, keyed and upserted |
+| `sessions` | one document per conversation |
+| `messages` | the transcripts |
+| `reminders` | pending, done, and cancelled, with recurrence |
+
+Facts are injected into the system prompt at session start, so Jarvis opens
+already knowing what you told it last week — and because the store is a
+server, the terminal, the web UI, and your phone all see the same memory.
+
+Reminders get small integer ids from a `counters` document rather than
+ObjectIds, so "cancel reminder 3" is a thing you can say out loud. A background
+thread fires them into whichever interface is running — printed in the
+terminal, pushed over the WebSocket, spoken aloud in voice mode. One-shot or
+recurring (`daily`, `weekdays`, `every 30 minutes`).
+
+Times are stored as native BSON dates in UTC so range queries and indexes work
+properly, and handed back to callers as ISO strings. One `MongoClient` is
+shared process-wide — pymongo pools internally, and a client per WebSocket
+connection would exhaust a small Atlas tier.
 
 ## Safety
 
@@ -122,6 +154,7 @@ model = "claude-opus-5"
 effort = "high"           # low | medium | high | xhigh | max
 approval = "prompt"       # auto | prompt | deny
 workspace = "~/projects"
+mongodb_db = "jarvis"
 max_depth = 2
 ```
 
@@ -134,6 +167,11 @@ Notable ones:
 - `JARVIS_REFUSAL_FALLBACKS=0` — turn off server-side fallback (needed on
   Bedrock, Vertex, and Foundry, which do not support it).
 - `JARVIS_WEB_TOOLS=0` — run without web access.
+- `MONGODB_URI` / `JARVIS_MONGODB_URI` — the connection string (the prefixed
+  one wins). `JARVIS_MONGODB_DB` picks the database name.
+
+Connection strings are redacted wherever Jarvis prints them, so a password
+never lands in your terminal or logs.
 
 ## Architecture
 
@@ -144,7 +182,7 @@ src/jarvis/
 ├── events.py      the event stream interfaces consume
 ├── config.py      defaults → config.toml → environment → flags
 ├── prompts.py     system prompts, split so the cached prefix stays stable
-├── memory.py      SQLite: facts, transcripts, reminders
+├── memory.py      MongoDB: facts, transcripts, reminders
 ├── reminders.py   "tomorrow at 9am" → a datetime, and the scheduler thread
 ├── tasks.py       background sub-agent tasks
 ├── toolkit.py     which tools an agent gets
@@ -164,9 +202,13 @@ the clock, so the cache prefix survives between turns.
 
 ```bash
 pip install -e '.[dev]'
-pytest            # no network: the API client is faked
+pytest            # no network, no database: the API client is faked and
+                  # Mongo runs in-process via mongomock
 ruff check src tests
 ```
+
+An autouse fixture replaces the Mongo client for the whole suite, so no test
+can reach a real server even by accident. 109 tests, about three seconds.
 
 ## License
 

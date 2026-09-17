@@ -1,58 +1,68 @@
 """Persistent memory: facts Jarvis remembers, transcripts, and reminders.
 
-One SQLite file under the data directory. The scheduler thread and the agent
-thread share a connection, so every write goes through a lock.
+Backed by MongoDB. One database (default `jarvis`) with four collections:
+`facts`, `sessions`, `messages`, `reminders`, plus a `counters` document that
+hands out small integer reminder ids - "cancel reminder 3" is sayable out loud
+in a way an ObjectId is not.
+
+Times are stored as native BSON dates in UTC so range queries and indexes work
+properly, and handed back to callers as ISO strings.
 """
 
 from __future__ import annotations
 
-import json
-import sqlite3
+import re
 import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS facts (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL,
-    category   TEXT NOT NULL DEFAULT 'general',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
+from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
+from pymongo.errors import PyMongoError
 
-CREATE TABLE IF NOT EXISTS sessions (
-    id         TEXT PRIMARY KEY,
-    title      TEXT,
-    interface  TEXT NOT NULL DEFAULT 'cli',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
+from .errors import JarvisError
 
-CREATE TABLE IF NOT EXISTS messages (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    role       TEXT NOT NULL,
-    content    TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
+DEFAULT_URI = "mongodb://localhost:27017"
+DEFAULT_DB = "jarvis"
+# Fail fast and say something useful instead of hanging on an unreachable Atlas.
+SERVER_SELECTION_TIMEOUT_MS = 5000
 
-CREATE TABLE IF NOT EXISTS reminders (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    text       TEXT NOT NULL,
-    due_at     TEXT NOT NULL,
-    recurrence TEXT,
-    status     TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT NOT NULL,
-    fired_at   TEXT
-);
 
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
-CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(status, due_at);
-"""
+class StorageError(JarvisError):
+    """The database could not be reached or a write failed."""
+
+
+# One client per process, shared across sessions: pymongo pools connections
+# internally, and a client per web-socket connection would exhaust the
+# connection limit on a small Atlas tier. Cleared by the test suite.
+_CLIENTS: dict[str, Any] = {}
+_INDEXED: set[str] = set()
+_CLIENT_LOCK = threading.Lock()
+
+
+def shared_client(uri: str) -> Any:
+    """The process-wide client for this URI, created on first use."""
+    with _CLIENT_LOCK:
+        client = _CLIENTS.get(uri)
+        if client is None:
+            client = MongoClient(
+                uri,
+                tz_aware=True,
+                serverSelectionTimeoutMS=SERVER_SELECTION_TIMEOUT_MS,
+                appname="jarvis",
+            )
+            _CLIENTS[uri] = client
+        return client
+
+
+def close_clients() -> None:
+    """Close every shared client. For process shutdown and tests."""
+    with _CLIENT_LOCK:
+        for client in _CLIENTS.values():
+            client.close()
+        _CLIENTS.clear()
+        _INDEXED.clear()
 
 
 def utcnow() -> datetime:
@@ -64,6 +74,20 @@ def iso(moment: datetime) -> str:
     if moment.tzinfo is None:
         moment = moment.astimezone()
     return moment.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def _utc(moment: datetime) -> datetime:
+    """Normalize to an aware UTC datetime, for storing and comparing."""
+    if moment.tzinfo is None:
+        moment = moment.astimezone()
+    return moment.astimezone(UTC)
+
+
+def _as_iso(value: Any) -> str:
+    """A BSON date back out as an ISO string. Tolerates a stored string."""
+    if isinstance(value, datetime):
+        return iso(value)
+    return str(value) if value else ""
 
 
 @dataclass(slots=True)
@@ -89,177 +113,227 @@ class Reminder:
         return datetime.fromisoformat(self.due_at)
 
 
-class Store:
+def _fact(doc: dict[str, Any]) -> Fact:
+    return Fact(
+        key=doc["_id"],
+        value=doc.get("value", ""),
+        category=doc.get("category", "general"),
+        updated_at=_as_iso(doc.get("updated_at")),
+    )
+
+
+def _reminder(doc: dict[str, Any]) -> Reminder:
+    return Reminder(
+        id=doc["_id"],
+        text=doc.get("text", ""),
+        due_at=_as_iso(doc.get("due_at")),
+        recurrence=doc.get("recurrence"),
+        status=doc.get("status", "pending"),
+        created_at=_as_iso(doc.get("created_at")),
+        fired_at=_as_iso(doc.get("fired_at")) or None,
+    )
+
+
+class MongoStore:
     """Everything Jarvis keeps between runs."""
 
-    def __init__(self, path: Path | str) -> None:
-        self.path = Path(path)
-        if str(self.path) != ":memory:":
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        with self._lock:
-            self._conn.executescript(SCHEMA)
-            self._conn.commit()
+    def __init__(
+        self,
+        uri: str = DEFAULT_URI,
+        db_name: str = DEFAULT_DB,
+        client: Any = None,
+        ensure_indexes: bool = True,
+    ) -> None:
+        self.uri = uri
+        self.db_name = db_name
+        self._client = client or shared_client(uri)
+        self.db = self._client[db_name]
+        self.facts = self.db["facts"]
+        self.sessions = self.db["sessions"]
+        self.messages = self.db["messages"]
+        self.reminders = self.db["reminders"]
+        self.counters = self.db["counters"]
+        if ensure_indexes:
+            self._ensure_indexes()
+
+    def _ensure_indexes(self) -> None:
+        """Once per process per database - not on every session.
+
+        Idempotent, and a missing index is not worth refusing to start over.
+        """
+        marker = f"{self.uri}/{self.db_name}"
+        with _CLIENT_LOCK:
+            if marker in _INDEXED:
+                return
+            _INDEXED.add(marker)
+        try:
+            self.facts.create_index([("updated_at", DESCENDING)])
+            self.facts.create_index([("category", ASCENDING)])
+            self.sessions.create_index([("updated_at", DESCENDING)])
+            self.messages.create_index([("session_id", ASCENDING), ("_id", ASCENDING)])
+            self.reminders.create_index([("status", ASCENDING), ("due_at", ASCENDING)])
+        except PyMongoError:
+            pass
+
+    def ping(self) -> None:
+        """Raise StorageError unless the server answers."""
+        try:
+            self._client.admin.command("ping")
+        except PyMongoError as exc:
+            raise StorageError(unreachable_message(self.uri, exc)) from exc
 
     def close(self) -> None:
-        with self._lock:
-            self._conn.close()
+        """A no-op by design: the client is shared process-wide.
+
+        Closing here would pull the connection pool out from under every other
+        live session. Use close_clients() at process shutdown instead.
+        """
+        return None
+
+    def _next_id(self, name: str) -> int:
+        """A small monotonic integer, the standard Mongo counter pattern."""
+        doc = self.counters.find_one_and_update(
+            {"_id": name},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        return int(doc["seq"])
 
     # -- facts ---------------------------------------------------------
     def remember(self, key: str, value: str, category: str = "general") -> Fact:
         key = key.strip().lower()
         if not key:
             raise ValueError("a fact needs a key")
-        now = iso(utcnow())
-        with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO facts (key, value, category, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value = excluded.value,
-                    category = excluded.category,
-                    updated_at = excluded.updated_at
-                """,
-                (key, value, category, now, now),
-            )
-            self._conn.commit()
-        return Fact(key=key, value=value, category=category, updated_at=now)
+        now = utcnow()
+        self.facts.update_one(
+            {"_id": key},
+            {
+                "$set": {"value": value, "category": category, "updated_at": now},
+                "$setOnInsert": {"created_at": now},
+            },
+            upsert=True,
+        )
+        return Fact(key=key, value=value, category=category, updated_at=iso(now))
 
     def recall(self, query: str = "", limit: int = 50) -> list[Fact]:
-        sql = "SELECT key, value, category, updated_at FROM facts"
-        params: tuple[Any, ...] = ()
+        criteria: dict[str, Any] = {}
         if query.strip():
-            sql += " WHERE key LIKE ? OR value LIKE ? OR category LIKE ?"
-            like = f"%{query.strip()}%"
-            params = (like, like, like)
-        sql += " ORDER BY updated_at DESC LIMIT ?"
-        params += (limit,)
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-        return [Fact(**dict(row)) for row in rows]
+            # Escaped: a remembered value is not a regular expression.
+            pattern = re.compile(re.escape(query.strip()), re.IGNORECASE)
+            criteria = {
+                "$or": [
+                    {"_id": pattern},
+                    {"value": pattern},
+                    {"category": pattern},
+                ]
+            }
+        cursor = self.facts.find(criteria).sort("updated_at", DESCENDING).limit(limit)
+        return [_fact(doc) for doc in cursor]
 
     def forget(self, key: str) -> bool:
-        with self._lock:
-            cur = self._conn.execute("DELETE FROM facts WHERE key = ?", (key.strip().lower(),))
-            self._conn.commit()
-        return cur.rowcount > 0
+        return self.facts.delete_one({"_id": key.strip().lower()}).deleted_count > 0
 
     # -- sessions and transcripts --------------------------------------
     def create_session(self, interface: str = "cli", title: str | None = None) -> str:
         session_id = uuid.uuid4().hex[:12]
-        now = iso(utcnow())
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO sessions (id, title, interface, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (session_id, title, interface, now, now),
-            )
-            self._conn.commit()
+        now = utcnow()
+        self.sessions.insert_one({
+            "_id": session_id,
+            "title": title,
+            "interface": interface,
+            "created_at": now,
+            "updated_at": now,
+        })
         return session_id
 
     def add_message(self, session_id: str, role: str, content: Any) -> None:
-        now = iso(utcnow())
-        payload = json.dumps(content, default=str)
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (session_id, role, payload, now),
-            )
-            self._conn.execute(
-                "UPDATE sessions SET updated_at = ? WHERE id = ?", (now, session_id)
-            )
-            self._conn.commit()
+        now = utcnow()
+        self.messages.insert_one({
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            "created_at": now,
+        })
+        self.sessions.update_one({"_id": session_id}, {"$set": {"updated_at": now}})
 
     def session_messages(self, session_id: str) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id",
-                (session_id,),
-            ).fetchall()
-        return [{"role": row["role"], "content": json.loads(row["content"])} for row in rows]
+        # Sorted by _id: an ObjectId is monotonic within the process that wrote
+        # it, and one conversation is only ever written by one process.
+        cursor = self.messages.find({"session_id": session_id}).sort("_id", ASCENDING)
+        return [{"role": doc["role"], "content": doc["content"]} for doc in cursor]
 
     def recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT id, title, interface, created_at, updated_at FROM sessions"
-                " ORDER BY updated_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return [dict(row) for row in rows]
+        cursor = self.sessions.find().sort("updated_at", DESCENDING).limit(limit)
+        return [
+            {
+                "id": doc["_id"],
+                "title": doc.get("title"),
+                "interface": doc.get("interface", "cli"),
+                "created_at": _as_iso(doc.get("created_at")),
+                "updated_at": _as_iso(doc.get("updated_at")),
+            }
+            for doc in cursor
+        ]
 
     # -- reminders -----------------------------------------------------
     def add_reminder(self, text: str, due_at: datetime, recurrence: str | None = None) -> Reminder:
-        now = iso(utcnow())
-        due = iso(due_at)
-        with self._lock:
-            cur = self._conn.execute(
-                "INSERT INTO reminders (text, due_at, recurrence, status, created_at)"
-                " VALUES (?, ?, ?, 'pending', ?)",
-                (text, due, recurrence, now),
-            )
-            self._conn.commit()
-            reminder_id = int(cur.lastrowid or 0)
-        return Reminder(
-            id=reminder_id,
-            text=text,
-            due_at=due,
-            recurrence=recurrence,
-            status="pending",
-            created_at=now,
-        )
+        now = utcnow()
+        doc = {
+            "_id": self._next_id("reminders"),
+            "text": text,
+            "due_at": _utc(due_at),
+            "recurrence": recurrence,
+            "status": "pending",
+            "created_at": now,
+            "fired_at": None,
+        }
+        self.reminders.insert_one(doc)
+        return _reminder(doc)
 
     def due_reminders(self, now: datetime | None = None) -> list[Reminder]:
-        moment = iso(now or utcnow())
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM reminders WHERE status = 'pending' AND due_at <= ? ORDER BY due_at",
-                (moment,),
-            ).fetchall()
-        return [Reminder(**dict(row)) for row in rows]
+        cursor = self.reminders.find(
+            {"status": "pending", "due_at": {"$lte": _utc(now or utcnow())}}
+        ).sort("due_at", ASCENDING)
+        return [_reminder(doc) for doc in cursor]
 
     def list_reminders(self, status: str = "pending", limit: int = 50) -> list[Reminder]:
-        sql = "SELECT * FROM reminders"
-        params: tuple[Any, ...] = ()
-        if status != "all":
-            sql += " WHERE status = ?"
-            params = (status,)
-        sql += " ORDER BY due_at LIMIT ?"
-        params += (limit,)
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-        return [Reminder(**dict(row)) for row in rows]
+        criteria = {} if status == "all" else {"status": status}
+        cursor = self.reminders.find(criteria).sort("due_at", ASCENDING).limit(limit)
+        return [_reminder(doc) for doc in cursor]
 
     def get_reminder(self, reminder_id: int) -> Reminder | None:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM reminders WHERE id = ?", (reminder_id,)
-            ).fetchone()
-        return Reminder(**dict(row)) if row else None
+        doc = self.reminders.find_one({"_id": reminder_id})
+        return _reminder(doc) if doc else None
 
     def complete_reminder(self, reminder_id: int, next_due: datetime | None = None) -> None:
         """Mark fired. A recurring reminder is rescheduled instead of closed."""
-        now = iso(utcnow())
-        with self._lock:
-            if next_due is not None:
-                self._conn.execute(
-                    "UPDATE reminders SET due_at = ?, fired_at = ? WHERE id = ?",
-                    (iso(next_due), now, reminder_id),
-                )
-            else:
-                self._conn.execute(
-                    "UPDATE reminders SET status = 'done', fired_at = ? WHERE id = ?",
-                    (now, reminder_id),
-                )
-            self._conn.commit()
+        now = utcnow()
+        if next_due is not None:
+            update = {"$set": {"due_at": _utc(next_due), "fired_at": now}}
+        else:
+            update = {"$set": {"status": "done", "fired_at": now}}
+        self.reminders.update_one({"_id": reminder_id}, update)
 
     def cancel_reminder(self, reminder_id: int) -> bool:
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE reminders SET status = 'cancelled' WHERE id = ? AND status = 'pending'",
-                (reminder_id,),
-            )
-            self._conn.commit()
-        return cur.rowcount > 0
+        result = self.reminders.update_one(
+            {"_id": reminder_id, "status": "pending"}, {"$set": {"status": "cancelled"}}
+        )
+        return result.modified_count > 0
+
+
+def redact_uri(uri: str) -> str:
+    """A connection string safe to print: the password never appears."""
+    return re.sub(r"://([^:/@]+):([^@]+)@", r"://\1:***@", uri)
+
+
+def unreachable_message(uri: str, exc: Exception) -> str:
+    """What to tell a person whose database is not answering."""
+    # pymongo's message carries a full topology dump; keep the first clause.
+    reason = str(exc).split("(configured timeouts")[0].split(", Timeout:")[0]
+    reason = reason.strip().rstrip(",") or type(exc).__name__
+    return (
+        f"Could not reach MongoDB at {redact_uri(uri)} - {reason}.\n"
+        "Check MONGODB_URI, that the cluster is awake, and that this machine's "
+        "IP is allowed in Atlas. `jarvis doctor` tests the connection."
+    )

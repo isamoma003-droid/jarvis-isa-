@@ -46,24 +46,28 @@ def test_the_cli_parses_its_subcommands():
     assert parser.parse_args([]).command is None
 
 
-def test_doctor_runs_without_network(tmp_path, monkeypatch, capsys):
+def test_doctor_reports_on_mongo(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("JARVIS_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("MONGODB_URI", "mongodb+srv://isa:hunter2@cluster0.abc.mongodb.net/")
     cli.main(["doctor"])
+
     printed = capsys.readouterr().out
-    assert "workspace" in printed and "database" in printed
+    assert "workspace" in printed
+    assert "mongodb" in printed
+    assert "cluster0.abc.mongodb.net" in printed
+    assert "hunter2" not in printed  # the password never reaches the terminal
 
 
 def test_memory_and_reminder_commands(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
     from jarvis.config import JarvisConfig
-    from jarvis.memory import Store, utcnow
+    from jarvis.memory import MongoStore, utcnow
 
     config = JarvisConfig.load(config_file=tmp_path / "none.toml")
-    store = Store(config.db_path)
+    store = MongoStore(config.mongodb_uri, config.mongodb_db)
     store.remember("editor", "neovim", "preference")
     store.add_reminder("standup", utcnow())
-    store.close()
 
     assert cli.main(["memory"]) == 0
     assert "neovim" in capsys.readouterr().out

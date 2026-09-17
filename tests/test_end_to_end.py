@@ -20,7 +20,7 @@ def test_a_full_conversation(config, workspace, store):
             text="On it.",
         ),
         tool_turn([("set_reminder", {"text": "ship it", "when": "in 5 minutes"})]),
-        tool_turn([("delegate", {"task": "check the plan reads well", "agent": "analyst"})]),
+        tool_turn([("delegate", {"task": "check the plan reads well", "agent": "scout"})]),
         text_turn("Reads fine."),                      # the sub-agent's report
         text_turn("Plan written, reminder set, and it reads fine."),
     ])

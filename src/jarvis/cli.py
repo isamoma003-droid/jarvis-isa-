@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from pymongo.errors import PyMongoError
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
@@ -304,10 +305,24 @@ def doctor(config: JarvisConfig) -> int:
     check("workspace", config.workspace.is_dir(), str(config.workspace))
     try:
         config.ensure_dirs()
-        config.db_path.parent.mkdir(parents=True, exist_ok=True)
-        check("database", True, str(config.db_path))
+        check("data directory", True, str(config.data_dir))
     except OSError as exc:
-        check("database", False, str(exc))
+        check("data directory", False, str(exc))
+
+    from .memory import MongoStore, StorageError, redact_uri
+
+    store = None
+    try:
+        store = MongoStore(config.mongodb_uri, config.mongodb_db, ensure_indexes=False)
+        store.ping()
+        check("mongodb", True, f"{redact_uri(config.mongodb_uri)} -> {config.mongodb_db}")
+    except StorageError as exc:
+        check("mongodb", False, str(exc))
+    except Exception as exc:
+        check("mongodb", False, f"{type(exc).__name__}: {exc}")
+    finally:
+        if store is not None:
+            store.close()
     check("shell", shutil.which("bash") is not None, "bash")
 
     console.print("\n  [bold]optional[/bold]")
@@ -332,9 +347,10 @@ def doctor(config: JarvisConfig) -> int:
 
 
 def memory_command(config: JarvisConfig, args: argparse.Namespace) -> int:
-    from .memory import Store
+    from .memory import MongoStore
 
-    store = Store(config.db_path)
+    store = MongoStore(config.mongodb_uri, config.mongodb_db)
+    store.ping()
     try:
         if args.forget:
             console.print(
@@ -356,10 +372,11 @@ def memory_command(config: JarvisConfig, args: argparse.Namespace) -> int:
 
 
 def reminders_command(config: JarvisConfig, args: argparse.Namespace) -> int:
-    from .memory import Store
+    from .memory import MongoStore
     from .tools.reminder_tools import _local
 
-    store = Store(config.db_path)
+    store = MongoStore(config.mongodb_uri, config.mongodb_db)
+    store.ping()
     try:
         if args.cancel:
             ok = store.cancel_reminder(args.cancel)
@@ -468,9 +485,18 @@ def main(argv: list[str] | None = None) -> int:
     except JarvisError as exc:
         console.print(f"[red]{exc}[/red]")
         return 1
+    except PyMongoError as exc:
+        from .memory import unreachable_message
+
+        console.print(f"[red]{escape(unreachable_message(config.mongodb_uri, exc))}[/red]")
+        return 1
     except KeyboardInterrupt:
         console.print("\n[dim]interrupted[/dim]")
         return 130
+    finally:
+        from .memory import close_clients
+
+        close_clients()
 
 
 if __name__ == "__main__":

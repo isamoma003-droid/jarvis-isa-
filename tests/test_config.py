@@ -13,7 +13,28 @@ def test_defaults(tmp_path):
     config = JarvisConfig(workspace=tmp_path, data_dir=tmp_path / "data")
     assert config.model == "claude-opus-5"
     assert config.worker_model == "claude-opus-5"
-    assert config.db_path == tmp_path / "data" / "jarvis.db"
+    assert config.mongodb_uri == "mongodb://localhost:27017"
+    assert config.mongodb_db == "jarvis"
+
+
+def test_mongodb_uri_comes_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("MONGODB_URI", "mongodb+srv://u:p@cluster0.abc.mongodb.net/")
+    config = JarvisConfig.load(config_file=tmp_path / "none.toml")
+    assert config.mongodb_uri.startswith("mongodb+srv://")
+
+    # the JARVIS_ prefixed name wins when both are set
+    monkeypatch.setenv("JARVIS_MONGODB_URI", "mongodb://elsewhere:27017")
+    assert JarvisConfig.load(config_file=tmp_path / "none.toml").mongodb_uri == (
+        "mongodb://elsewhere:27017"
+    )
+
+
+def test_connection_strings_are_redacted_before_printing():
+    from jarvis.memory import redact_uri
+
+    redacted = redact_uri("mongodb+srv://isa:hunter2@cluster0.abc.mongodb.net/jarvis")
+    assert "hunter2" not in redacted
+    assert "isa" in redacted and "cluster0.abc.mongodb.net" in redacted
 
 
 def test_environment_overrides_the_file(tmp_path, monkeypatch):

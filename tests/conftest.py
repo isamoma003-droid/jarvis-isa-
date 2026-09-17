@@ -5,10 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import mongomock
 import pytest
 
 from jarvis.config import JarvisConfig
-from jarvis.memory import Store
+from jarvis.memory import MongoStore
 from jarvis.tasks import TaskRegistry
 from jarvis.tools.base import ToolContext
 
@@ -138,10 +139,28 @@ def workspace(config) -> Any:
 
 
 @pytest.fixture
-def store() -> Store:
-    store = Store(":memory:")
-    yield store
-    store.close()
+def mongo_client():
+    """One in-process Mongo per test. Isolated, so tests cannot leak into each other."""
+    return mongomock.MongoClient(tz_aware=True)
+
+
+@pytest.fixture(autouse=True)
+def no_real_mongo(monkeypatch, mongo_client):
+    """Nothing in the suite may dial a real server, however deep the call is."""
+    import jarvis.memory
+
+    monkeypatch.setattr(jarvis.memory, "MongoClient", lambda *args, **kwargs: mongo_client)
+    # the process-wide client cache would otherwise leak between tests
+    jarvis.memory._CLIENTS.clear()
+    jarvis.memory._INDEXED.clear()
+    yield
+    jarvis.memory._CLIENTS.clear()
+    jarvis.memory._INDEXED.clear()
+
+
+@pytest.fixture
+def store(mongo_client) -> MongoStore:
+    return MongoStore(client=mongo_client)
 
 
 @pytest.fixture

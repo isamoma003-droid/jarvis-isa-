@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 from .errors import ConfigError
+from .memory import DEFAULT_DB, DEFAULT_URI
 
 # The model everything runs on unless told otherwise.
 DEFAULT_MODEL = "claude-opus-5"
@@ -78,6 +79,8 @@ class JarvisConfig:
     # --- where things live ---
     workspace: Path = field(default_factory=Path.cwd)
     data_dir: Path = field(default_factory=lambda: Path.home() / ".jarvis")
+    mongodb_uri: str = DEFAULT_URI
+    mongodb_db: str = DEFAULT_DB
 
     # --- safety ---
     approval: str = "prompt"
@@ -119,10 +122,6 @@ class JarvisConfig:
             raise ConfigError("max_iterations must be at least 1")
 
     @property
-    def db_path(self) -> Path:
-        return self.data_dir / "jarvis.db"
-
-    @property
     def worker_model(self) -> str:
         """The model sub-agents run on - the main one unless overridden."""
         return self.subagent_model or self.model
@@ -148,7 +147,13 @@ class JarvisConfig:
                 else:
                     raise ConfigError(f"unknown option {key!r} in {path}")
 
+        # MONGODB_URI is the conventional name; the JARVIS_ prefixed one wins.
+        for name in ("MONGODB_URI", "JARVIS_MONGODB_URI"):
+            if os.environ.get(name):
+                values["mongodb_uri"] = os.environ[name]
+
         env_map = {
+            "mongodb_db": "JARVIS_MONGODB_DB",
             "model": "JARVIS_MODEL",
             "subagent_model": "JARVIS_SUBAGENT_MODEL",
             "effort": "JARVIS_EFFORT",

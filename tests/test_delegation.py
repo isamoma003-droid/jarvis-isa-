@@ -23,7 +23,7 @@ def main_agent(client, config, context):
 
 def test_delegation_returns_the_subagent_report(config, context):
     client = FakeClient([
-        tool_turn([("delegate", {"task": "find the release date", "agent": "researcher"})]),
+        tool_turn([("delegate", {"task": "find the release date", "agent": "scout"})]),
         text_turn("REPORT: shipped on Tuesday."),      # the sub-agent's turn
         text_turn("It shipped on Tuesday."),           # back in the main conversation
     ])
@@ -38,7 +38,7 @@ def test_delegation_returns_the_subagent_report(config, context):
 
 def test_a_subagent_gets_its_own_system_prompt_and_tools(config, context):
     client = FakeClient([
-        tool_turn([("delegate", {"task": "look at the code", "agent": "analyst"})]),
+        tool_turn([("delegate", {"task": "look at the code", "agent": "scout"})]),
         text_turn("read-only findings"),
         text_turn("done"),
     ])
@@ -51,12 +51,12 @@ def test_a_subagent_gets_its_own_system_prompt_and_tools(config, context):
     assert "delegate" not in tool_names        # and cannot delegate onward
     assert "read_file" in tool_names
     assert subagent_call["output_config"] == {"effort": "low"}
-    assert "analyst" in subagent_call["system"][0]["text"]
+    assert "scout" in subagent_call["system"][0]["text"]
 
 
 def test_the_coder_profile_has_no_web_access(config, context):
     client = FakeClient([
-        tool_turn([("delegate", {"task": "fix the test", "agent": "coder"})]),
+        tool_turn([("delegate", {"task": "fix the test", "agent": "flux"})]),
         text_turn("fixed"),
         text_turn("done"),
     ])
@@ -83,7 +83,7 @@ def test_background_delegation_returns_a_task_id(config, context):
     client = FakeClient([text_turn("background report")])
     context.client = client
 
-    answer = delegate(context, {"task": "slow research", "background": True, "agent": "researcher"})
+    answer = delegate(context, {"task": "slow research", "background": True, "agent": "scout"})
     assert "task_" in answer
 
     task_id = answer.split("Started ")[1].split(" ")[0]

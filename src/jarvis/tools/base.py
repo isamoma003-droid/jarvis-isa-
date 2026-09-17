@@ -13,7 +13,7 @@ from ..events import Event
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checkers
     from ..config import JarvisConfig
-    from ..memory import Store
+    from ..memory import MongoStore
     from ..tasks import TaskRegistry
 
 _JSON_TYPES: dict[str, type | tuple[type, ...]] = {
@@ -31,7 +31,7 @@ class ToolContext:
     """Everything a tool is allowed to touch."""
 
     config: JarvisConfig
-    store: Store
+    store: MongoStore
     client: Any = None
     tasks: TaskRegistry | None = None
     emit: Callable[[Event], None] = lambda event: None

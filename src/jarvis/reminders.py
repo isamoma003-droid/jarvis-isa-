@@ -8,7 +8,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from .memory import Reminder, Store, utcnow
+from .memory import MongoStore, Reminder, utcnow
 
 _UNITS = {
     "s": "seconds", "sec": "seconds", "secs": "seconds",
@@ -162,7 +162,7 @@ class ReminderScheduler:
 
     def __init__(
         self,
-        store: Store,
+        store: MongoStore,
         on_fire: Callable[[Reminder], Any],
         poll_seconds: int = 20,
     ) -> None:

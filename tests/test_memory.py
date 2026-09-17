@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from jarvis.memory import Store, utcnow
+from jarvis.memory import MongoStore, utcnow
 from jarvis.reminders import (
     ReminderScheduler,
     TimeParseError,
@@ -17,15 +17,27 @@ from jarvis.reminders import (
 from jarvis.tasks import TaskRegistry
 
 
-def test_facts_survive_reopening(tmp_path):
-    path = tmp_path / "jarvis.db"
-    store = Store(path)
-    store.remember("name", "Isa", "identity")
-    store.close()
+def test_facts_outlive_the_store_object(mongo_client):
+    """A fact lives in the database, not in the Python object that wrote it."""
+    first = MongoStore(client=mongo_client)
+    first.remember("name", "Isa", "identity")
+    first.close()
 
-    reopened = Store(path)
+    reopened = MongoStore(client=mongo_client)
     assert [f.value for f in reopened.recall()] == ["Isa"]
-    reopened.close()
+
+
+def test_reminder_ids_are_small_integers(store):
+    """Sayable out loud: "cancel reminder 2", not an ObjectId."""
+    first = store.add_reminder("one", utcnow())
+    second = store.add_reminder("two", utcnow())
+    assert (first.id, second.id) == (1, 2)
+
+
+def test_a_search_term_is_not_treated_as_a_regex(store):
+    store.remember("editor", "neovim", "preference")
+    assert store.recall(".*") == []      # would match everything if unescaped
+    assert store.recall("neo(vim") == []  # would raise if unescaped
 
 
 def test_recall_searches_key_value_and_category(store):
@@ -171,3 +183,65 @@ def test_task_progress_is_visible_while_running():
     release.set()
     assert registry.wait(task.id, timeout=5).status == "done"
     registry.shutdown(wait=True)
+
+
+def test_one_client_is_shared_across_stores(mongo_client):
+    """A client per session would exhaust a small Atlas tier's connections."""
+    import jarvis.memory as memory
+
+    first = MongoStore("mongodb://localhost:27017")
+    second = MongoStore("mongodb://localhost:27017")
+    assert first._client is second._client
+    assert len(memory._CLIENTS) == 1
+
+    # closing one session must not pull the pool out from under the other
+    first.close()
+    second.remember("still", "working")
+    assert [f.key for f in second.recall()] == ["still"]
+
+
+def test_indexes_are_built_once_per_process(mongo_client):
+    import jarvis.memory as memory
+
+    MongoStore("mongodb://localhost:27017")
+    MongoStore("mongodb://localhost:27017")
+    assert memory._INDEXED == {"mongodb://localhost:27017/jarvis"}
+
+
+def test_an_unreachable_server_is_explained_not_dumped():
+    """pymongo's own error is a topology dump; a person needs one sentence."""
+    from pymongo.errors import ServerSelectionTimeoutError
+
+    from jarvis.memory import unreachable_message
+
+    exc = ServerSelectionTimeoutError(
+        "127.0.0.1:27099: [Errno 111] Connection refused (configured timeouts: "
+        "socketTimeoutMS: 20000.0ms), Timeout: 5.0s, Topology Description: <...>"
+    )
+    message = unreachable_message("mongodb+srv://isa:hunter2@cluster0.abc.mongodb.net/", exc)
+
+    assert "Connection refused" in message
+    assert "Topology Description" not in message
+    assert "hunter2" not in message
+    assert "jarvis doctor" in message
+
+
+def test_ping_raises_a_jarvis_error(mongo_client):
+    from pymongo.errors import ServerSelectionTimeoutError
+
+    from jarvis.errors import JarvisError
+    from jarvis.memory import StorageError
+
+    class Dead:
+        class admin:
+            @staticmethod
+            def command(*args, **kwargs):
+                raise ServerSelectionTimeoutError("nope")
+
+        def __getitem__(self, name):
+            return mongo_client[name]
+
+    store = MongoStore(client=Dead(), ensure_indexes=False)
+    with pytest.raises(StorageError) as caught:
+        store.ping()
+    assert isinstance(caught.value, JarvisError)  # so the CLI renders it in red

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover
     from .config import JarvisConfig
-    from .memory import Store
+    from .memory import MongoStore
 
 IDENTITY = """\
 You are Jarvis, {owner}'s personal assistant. You run on their machine with real \
@@ -56,7 +56,7 @@ what you used.
 """
 
 
-def _facts_block(store: Store | None, limit: int = 40) -> str:
+def _facts_block(store: MongoStore | None, limit: int = 40) -> str:
     if store is None:
         return ""
     facts = store.recall(limit=limit)
@@ -80,7 +80,7 @@ def _volatile_block(config: JarvisConfig, interface: str) -> dict[str, Any]:
 
 def system_blocks(
     config: JarvisConfig,
-    store: Store | None = None,
+    store: MongoStore | None = None,
     interface: str = "cli",
     owner: str = "the user",
 ) -> list[dict[str, Any]]:

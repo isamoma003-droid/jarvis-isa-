@@ -27,39 +27,47 @@ class Profile:
 
 
 PROFILES: dict[str, Profile] = {
-    "researcher": Profile(
-        name="researcher",
-        description="Looks things up on the web and reports back with sources.",
-        tools=("read_file", "list_dir", "search_text", "find_files", "remember"),
+    "scout": Profile(
+        name="scout",
+        description=(
+            "Research: looks things up, reads without changing anything, cites sources."
+        ),
+        tools=("read_file", "list_dir", "search_text", "find_files", "recall", "remember"),
         web=True,
         brief=(
-            "You are a research sub-agent. Answer the task from primary sources, "
-            "search and fetch as needed, and finish with a compact report: the answer "
-            "first, then the sources you used. Say plainly what you could not confirm."
+            "You are Scout, the research sub-agent. Answer the task from primary sources - "
+            "search and fetch the web, read what is already in the workspace - and finish "
+            "with a compact report: the answer first, then the evidence and sources behind "
+            "it. You have no write access, so analysis and citation are the deliverable. "
+            "Say plainly what you could not confirm."
         ),
     ),
-    "coder": Profile(
-        name="coder",
-        description="Reads, writes, and runs code in the workspace.",
+    "relay": Profile(
+        name="relay",
+        description="Comms: drafts messages, replies, and summaries for a human to send.",
+        tools=("read_file", "write_file", "list_dir", "search_text", "recall", "remember"),
+        web=True,
+        brief=(
+            "You are Relay, the communications sub-agent. Draft the message, reply, or "
+            "summary the task asks for, in the register the recipient expects. You cannot "
+            "send anything - save the draft to the workspace and report where it is, so a "
+            "human sends it. Never invent a fact about the recipient or the history; if you "
+            "need something you were not given, leave a clearly marked gap in the draft."
+        ),
+    ),
+    "flux": Profile(
+        name="flux",
+        description="Tasks: changes files, runs commands, and reports what actually happened.",
         tools=(
             "read_file", "write_file", "edit_file", "list_dir",
             "find_files", "search_text", "run_shell",
         ),
         web=False,
         brief=(
-            "You are a coding sub-agent. Make the change the task asks for, run whatever "
+            "You are Flux, the task sub-agent. Do the work the task asks for, run whatever "
             "check the project already uses (tests, linter, build), and report what you "
-            "changed, what you ran, and the actual result. Do not widen the task."
-        ),
-    ),
-    "analyst": Profile(
-        name="analyst",
-        description="Reads material and reasons about it without changing anything.",
-        tools=("read_file", "list_dir", "find_files", "search_text", "recall"),
-        web=True,
-        brief=(
-            "You are an analysis sub-agent. You have read-only access. Work through the "
-            "task and report findings with the evidence that supports each one."
+            "changed, what you ran, and the real result - including failures. Do not widen "
+            "the task beyond what was asked."
         ),
     ),
     "general": Profile(
@@ -70,7 +78,10 @@ PROFILES: dict[str, Profile] = {
             "search_text", "run_shell", "remember", "recall", "set_reminder",
         ),
         web=True,
-        brief="You are a general-purpose sub-agent. Complete the task and report the outcome.",
+        brief=(
+            "You are a general-purpose sub-agent of Jarvis. Complete the task and report "
+            "the outcome."
+        ),
     ),
 }
 

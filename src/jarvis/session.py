@@ -15,7 +15,7 @@ from .agent import Agent
 from .config import NO_CREDENTIALS, JarvisConfig, credentials_available
 from .errors import ConfigError
 from .events import Event, ReminderFired, TurnFinished
-from .memory import Reminder, Store
+from .memory import MongoStore, Reminder
 from .prompts import system_blocks
 from .reminders import ReminderScheduler
 from .tasks import TaskRegistry
@@ -33,7 +33,7 @@ class Session:
         owner: str | None = None,
         confirm: Callable[[str, str], bool] | None = None,
         client: Any = None,
-        store: Store | None = None,
+        store: MongoStore | None = None,
         persist: bool = True,
     ) -> None:
         config.ensure_dirs()
@@ -42,7 +42,10 @@ class Session:
         self.persist = persist
         # Only close what we opened: an injected store belongs to the caller.
         self._owns_store = store is None
-        self.store = store or Store(config.db_path)
+        self.store = store or MongoStore(config.mongodb_uri, config.mongodb_db)
+        if self._owns_store:
+            # Fail here, with a readable message, rather than mid-turn.
+            self.store.ping()
         if client is None and not credentials_available():
             raise ConfigError(NO_CREDENTIALS)
         self.client = client or anthropic.Anthropic()
