@@ -16,7 +16,13 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import __version__
-from .config import APPROVAL_POLICIES, EFFORT_LEVELS, JarvisConfig, credentials_available
+from .config import (
+    APPROVAL_POLICIES,
+    EFFORT_LEVELS,
+    JarvisConfig,
+    credentials_available,
+    load_dotenv,
+)
 from .errors import JarvisError
 from .events import (
     ErrorEvent,
@@ -494,6 +500,10 @@ def doctor(config: JarvisConfig) -> int:
     # Checked first because nothing else can be right if this is wrong, and
     # because Linux Mint 21 still ships 3.10 - where `tomllib` and
     # `datetime.UTC` simply do not exist.
+    env_file = load_dotenv()
+    if env_file:
+        console.print(f"  [dim]settings loaded from {escape(str(env_file))}[/dim]\n")
+
     version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     check(
         "python",
@@ -795,6 +805,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    # Before anything reads os.environ. The repo ships a .env.example and
+    # git-ignores .env, so copying it has to actually do something.
+    load_dotenv()
     try:
         config = JarvisConfig.load(
             workspace=args.workspace,

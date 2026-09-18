@@ -82,7 +82,32 @@ MongoDB holds everything Jarvis remembers. The [Atlas](https://www.mongodb.com/a
 free M0 tier is plenty and means your memory follows you between your laptop,
 the VPS, and the phone PWA; `mongodb://localhost:27017` works too if you'd
 rather keep it on the machine. `jarvis doctor` will tell you whether it can
-reach the server. Copy `.env.example` to pin anything else.
+reach the server.
+
+Rather than exporting them every time, put them in a **`.env`** file — it is
+git-ignored, and Jarvis reads it on startup from the working directory or
+`~/.jarvis/.env`:
+
+```bash
+cp .env.example .env    # then edit it
+```
+
+```ini
+ANTHROPIC_API_KEY=sk-ant-...
+MONGODB_URI="mongodb+srv://USER:PASSWORD@cluster0.xxxxx.mongodb.net/"
+```
+
+Quote any value containing `#` or spaces. Anything you have actually exported
+wins over the file, so a one-off `MONGODB_URI=... jarvis doctor` still works.
+`jarvis doctor` prints which file it loaded, and every connection string is
+redacted wherever Jarvis prints one — the password never reaches your terminal
+or the audit log.
+
+**Two Atlas things that look like network faults.** Replace `<db_username>` and
+`<db_password>` — Atlas's copy button leaves those placeholders in, and Jarvis
+now names them instead of timing out. And add your machine under **Network
+Access**: a new cluster allows no addresses at all, and the symptom is a
+connection timeout that looks exactly like a broken network.
 
 ## Use it
 
@@ -377,7 +402,7 @@ ruff check src tests
 ```
 
 An autouse fixture replaces the Mongo client for the whole suite, so no test
-can reach a real server even by accident. 187 tests, about five seconds.
+can reach a real server even by accident. 203 tests, about five seconds.
 
 ## License
 

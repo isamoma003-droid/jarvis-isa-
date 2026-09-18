@@ -45,6 +45,64 @@ NO_CREDENTIALS = (
 )
 
 
+def load_env_file(path: Path) -> list[str]:
+    """Read a .env file into the environment. Returns the names it set.
+
+    Deliberately not a dependency: the realistic file is `KEY=value` lines with
+    optional quotes, `export` prefixes and comments, and that is thirty lines.
+
+    A variable already in the environment always wins, so an explicit
+    `export MONGODB_URI=...` overrides the file rather than being silently
+    ignored - the surprising direction is the other way round.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    applied: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        name, sep, value = line.partition("=")
+        if not sep:
+            continue
+        name = name.strip()
+        if not name or name in os.environ:
+            continue
+        value = value.strip()
+        # Strip one matching pair of quotes; anything inside them is literal,
+        # which is what saves passwords containing # or spaces.
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        else:
+            value = value.split(" #")[0].rstrip()
+        os.environ[name] = value
+        applied.append(name)
+    return applied
+
+
+def load_dotenv(explicit: Path | None = None) -> Path | None:
+    """Load the first .env we find. Returns which one, or None.
+
+    Looks beside the working directory first so a checkout carries its own
+    settings, then in the data directory so a laptop-wide one works from
+    anywhere.
+    """
+    candidates = [explicit] if explicit else [
+        Path.cwd() / ".env",
+        Path.home() / ".jarvis" / ".env",
+    ]
+    for candidate in candidates:
+        if candidate and candidate.is_file():
+            load_env_file(candidate)
+            return candidate
+    return None
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
