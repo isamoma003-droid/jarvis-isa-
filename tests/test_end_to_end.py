@@ -69,6 +69,9 @@ def test_the_conversation_survives_a_failing_tool(config, workspace, store):
 def test_a_reminder_reaches_the_interface(config, store):
     client = FakeClient([])
     delivered = []
+    # Pinned, not left to the wall clock: the default quiet window is
+    # 22:00-07:00, so this passed by day and failed at night until it was fixed.
+    config.quiet_hours = ""
     store.add_reminder("drink water", utcnow())
 
     with Session(config, interface="cli", client=client, store=store) as session:
@@ -78,6 +81,22 @@ def test_a_reminder_reaches_the_interface(config, store):
         heartbeat.tick()
 
     assert [e.text for e in delivered if isinstance(e, ReminderFired)] == ["drink water"]
+
+
+def test_a_reminder_in_the_small_hours_is_held_rather_than_shouted(config, store):
+    """The other half of the same behaviour, and the reason the test above
+    needed pinning: at 3am a reminder waits for you instead of waking you."""
+    client = FakeClient([])
+    delivered = []
+    config.quiet_hours = "00:00-23:59"
+    store.add_reminder("drink water", utcnow())
+
+    with Session(config, interface="cli", client=client, store=store) as session:
+        heartbeat = session.start_heartbeat(delivered.append)
+        heartbeat.stop()
+        heartbeat.tick()
+        assert delivered == []                      # nobody was woken
+        assert [e.text for e in session.catch_up()] == ["drink water"]  # nor lost
 
 
 def test_reset_starts_a_new_conversation(config, store):

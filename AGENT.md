@@ -38,6 +38,7 @@ restating the request, no summary of a summary. This lives in `prompts.py`
 | Storage | MongoDB (Atlas free tier or local) | Memory follows me between the laptop, a VPS, and the phone. |
 | Terminal | `rich` | |
 | Web | FastAPI + WebSocket | |
+| Interface design | the [Trillion](https://hellotrillion.ai) language | Near-black ground, one teal accent, a living orb, conversation floating over it. Amber is reserved for the confirmation gate so the one moment it asks me for something never looks like anything else. |
 | Ears | **Deepgram** *(decided, not yet built)* | Streams; keeps the gap between releasing the key and being understood short. Local `faster-whisper` stays as the offline fallback. |
 | Mouth | **ElevenLabs** *(decided, not yet built)* | Natural enough to feel like a presence. `pyttsx3`/`say` stay as the offline fallback. |
 

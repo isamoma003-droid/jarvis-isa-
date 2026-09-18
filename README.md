@@ -75,26 +75,31 @@ In-REPL commands: `/help`, `/tools`, `/memory`, `/tasks`, `/reminders`,
 `/new`, `/approve <auto|prompt|deny>`, `/exit`. Ctrl-C stops the current turn;
 Ctrl-D exits.
 
-### The HUD
+### The interface
 
-`jarvis web` serves a J.A.R.V.I.S. interface, not a chat box:
+`jarvis web` serves an interface built in the [Trillion](https://hellotrillion.ai)
+design language — a near-black ground, one teal accent doing almost all the work,
+and the conversation floating over a single living orb:
 
-- an **arc reactor** that shifts colour and tempo with what Jarvis is doing —
-  cyan idle, faster when thinking, amber while a tool runs, red on a fault,
-  dimmed when the socket drops;
-- a **telemetry rail** — session clock, tokens in and out, cached tokens,
-  tools run, current state;
-- **gold authorisation dialogs** for anything that needs your approval, with
-  the exact command shown before you allow it;
-- an **inbox** of what the heartbeat surfaced, each item dismissible, and a
-  **hold** button that stops all proactive behaviour at once;
-- concentric rings and a slow radar sweep behind the conversation, scanlines
-  over it, and a short boot sequence on load.
+- **the orb** — a starfield and four layered radial gradients composited into one
+  bloom. Trillion's reacts to your voice; this one reacts to what the agent is
+  doing, which is the equivalent signal for a typed interface. It brightens and
+  quickens while thinking, turns amber while a tool runs, red on a fault, and goes
+  cold and grey when the socket drops. Colour and energy are eased toward their
+  targets, so a state change reads as the orb responding rather than blinking;
+- **an activity panel** — the inbox (each notice dismissible in place), session
+  telemetry, and what the core is set to. Collapses to a 32px rail;
+- **amber authorisation dialogs** — the one moment the interface asks *you* for
+  something, so it is deliberately the one thing that isn't teal. It names the
+  action, shows the exact command, and says plainly that approving it authorises
+  that action only;
+- **hold** — the kill switch in the header. The wordmark dot turns amber while
+  proactive behaviour is stopped.
 
-Readable first: the chrome glows, the body text doesn't — a HUD you can't
-read a stack trace in is a failed HUD. It respects `prefers-reduced-motion`
-(every animation here is decoration, never a barrier) and collapses to one
-column on a phone.
+Readable first: the chrome glows, the body text doesn't. It respects
+`prefers-reduced-motion` (every animation here is decoration, never a barrier)
+and drops the panel entirely on a phone, where the orb and the conversation are
+the product and telemetry is not.
 
 ## What it can do
 
@@ -333,7 +338,7 @@ ruff check src tests
 ```
 
 An autouse fixture replaces the Mongo client for the whole suite, so no test
-can reach a real server even by accident. 182 tests, about five seconds.
+can reach a real server even by accident. 187 tests, about five seconds.
 
 ## License
 

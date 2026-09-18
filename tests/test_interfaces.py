@@ -110,8 +110,12 @@ def test_web_health_and_page(web_client):
     assert client.get("/api/health").json()["model"] == "claude-opus-5"
 
     page = client.get("/").text
-    assert "J.A.R.V.I.S." in page
+    assert "<title>Jarvis</title>" in page
     assert "/static/app.js" in page and "/static/style.css" in page
+    # The pieces the interface is actually made of: the orb canvas, the inbox,
+    # the kill switch, and the composer.
+    for element in ('id="orb"', 'id="notices-button"', 'id="hold"', 'id="input"'):
+        assert element in page, element
 
 
 def test_web_socket_streams_a_turn(web_client):

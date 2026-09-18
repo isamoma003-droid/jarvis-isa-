@@ -143,9 +143,11 @@ def create_app(config: JarvisConfig, session_factory: Any = None) -> Any:
             "waiting": len(session.open_notices(limit=100)),
         })
         # Whatever was raised while no browser was attached has been held for
-        # exactly this moment.
+        # exactly this moment. Flagged, because arriving in a batch on connect is
+        # not the same as interrupting: the browser shows these without also
+        # firing a toast for each one.
         for held in session.catch_up():
-            send_event(held)
+            send({**held.to_dict(), "caught_up": True})
 
         try:
             while True:
