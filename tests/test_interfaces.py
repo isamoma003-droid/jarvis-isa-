@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from conftest import FakeClient, text_turn, tool_turn
 
@@ -246,3 +248,75 @@ def test_page_ids_are_unique_and_every_script_target_exists():
     wanted = set(re.findall(r'getElementById\("([^"]+)"\)', script))
     missing = wanted - set(ids)
     assert not missing, f"app.js reaches for elements that do not exist: {missing}"
+
+
+# --- doctor, on a fresh Linux box ------------------------------------
+def test_pip_hints_are_copy_pasteable():
+    # Escaped once at print time, not twice: a literal backslash in a command
+    # the user is meant to copy is a bug, not a cosmetic one.
+    assert cli._pip_hint("voice") == "pip install 'jarvis[voice]'"
+    assert "\\" not in cli._pip_hint("voice")
+
+
+def test_a_missing_system_library_is_reported_not_raised(monkeypatch):
+    """The regression this exists to prevent.
+
+    `sounddevice` raises OSError - not ImportError - when PortAudio is absent,
+    which is the single most common fresh-Linux problem. Catching only
+    ImportError took `jarvis doctor` down with a traceback at exactly the
+    moment its whole job was to explain what was wrong.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def explode(name, *args, **kwargs):
+        if name == "sounddevice":
+            raise OSError("PortAudio library not found")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", explode)
+    good, detail = cli._probe_audio()
+
+    assert good is False
+    assert "PortAudio library not found" in detail
+
+
+def test_audio_tells_apt_distros_which_package_to_install(monkeypatch, tmp_path):
+    release = tmp_path / "os-release"
+    release.write_text('ID=linuxmint\nID_LIKE=ubuntu debian\nUBUNTU_CODENAME=noble\n')
+    monkeypatch.setattr(cli, "Path", lambda p="": release if p == "/etc/os-release" else Path(p))
+    assert cli._apt_hint("libportaudio2") == "sudo apt install libportaudio2"
+
+
+def test_no_apt_advice_where_apt_is_the_wrong_answer(monkeypatch, tmp_path):
+    release = tmp_path / "os-release"
+    release.write_text('ID=fedora\nID_LIKE="rhel centos"\n')
+    monkeypatch.setattr(cli, "Path", lambda p="": release if p == "/etc/os-release" else Path(p))
+    assert cli._apt_hint("libportaudio2") == ""
+
+
+def test_speech_out_reports_what_it_would_actually_speak_through(monkeypatch):
+    # pyttsx3 imports cleanly with no engine behind it, so importing proves
+    # nothing: the probe has to ask what load_tts actually picked.
+    from jarvis.voice.tts import PrintSpeaker
+
+    monkeypatch.setattr("jarvis.voice.tts.load_tts", lambda backend="auto": PrintSpeaker())
+    good, detail = cli._probe_tts()
+    assert good is False
+    assert "printed" in detail
+
+
+def test_doctor_survives_every_optional_probe_failing(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("JARVIS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("JARVIS_WORKSPACE", str(tmp_path))
+
+    def explode() -> tuple[bool, str]:
+        raise OSError("some system library is missing")
+
+    for name in ("_probe_web", "_probe_audio", "_probe_stt", "_probe_tts"):
+        monkeypatch.setattr(cli, name, explode)
+
+    assert cli.main(["doctor"]) in (0, 1)          # reports, never raises
+    printed = capsys.readouterr().out
+    assert "some system library is missing" in printed

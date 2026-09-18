@@ -245,3 +245,27 @@ def test_ping_raises_a_jarvis_error(mongo_client):
     with pytest.raises(StorageError) as caught:
         store.ping()
     assert isinstance(caught.value, JarvisError)  # so the CLI renders it in red
+
+
+# --- when the database is not there ----------------------------------
+def test_a_local_database_that_is_not_running_gets_local_advice():
+    from jarvis.memory import unreachable_message
+
+    message = unreachable_message(
+        "mongodb://localhost:27017", ConnectionRefusedError("[Errno 111] Connection refused")
+    )
+    assert "Nothing is listening" in message
+    assert "docker run" in message
+    assert "no `mongodb` package" in message   # apt will not help on Mint
+    assert "IP is allowed in Atlas" not in message  # nothing is misconfigured
+
+
+def test_a_remote_cluster_gets_cluster_advice():
+    from jarvis.memory import unreachable_message
+
+    message = unreachable_message(
+        "mongodb+srv://isa:hunter2@cluster0.abc.mongodb.net/", TimeoutError("timed out")
+    )
+    assert "IP is allowed in Atlas" in message
+    assert "docker run" not in message
+    assert "hunter2" not in message            # the password never leaks into an error

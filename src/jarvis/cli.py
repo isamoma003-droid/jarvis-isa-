@@ -412,6 +412,75 @@ def ask_once(config: JarvisConfig, question: str) -> int:
     return 0
 
 
+def _apt_hint(packages: str) -> str:
+    """An apt line, but only where apt is the right answer."""
+    try:
+        release = Path("/etc/os-release").read_text()
+    except OSError:
+        return ""
+    if "debian" not in release.lower():  # covers Ubuntu, Mint, Pop!_OS, LMDE
+        return ""
+    return f"sudo apt install {packages}"
+
+
+def _pip_hint(extra: str) -> str:
+    # Plain text: the caller escapes once, at print time. Escaping here too
+    # puts a literal backslash in the command the user is meant to copy.
+    return f"pip install 'jarvis[{extra}]'"
+
+
+def _probe_web() -> tuple[bool, str]:
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+    except ImportError:
+        return False, _pip_hint("web")
+    return True, ""
+
+
+def _probe_audio() -> tuple[bool, str]:
+    """The microphone. Two separate failures, and they need different fixes."""
+    try:
+        import sounddevice
+    except ImportError:
+        return False, _pip_hint("voice")
+    except OSError as exc:
+        # The wheel installed fine; the system library it binds to is missing.
+        # Distinct from "not installed", and a pip command will not fix it.
+        hint = _apt_hint("libportaudio2") or "install PortAudio"
+        return False, f"{exc} - {hint}"
+    try:
+        inputs = [d for d in sounddevice.query_devices() if d.get("max_input_channels", 0) > 0]
+    except Exception as exc:  # noqa: BLE001 - no sound server, no devices, ...
+        return False, f"no audio devices ({type(exc).__name__}: {exc})"
+    if not inputs:
+        return False, "PortAudio works, but no input device - is a microphone connected?"
+    return True, f"{len(inputs)} input device(s)"
+
+
+def _probe_stt() -> tuple[bool, str]:
+    try:
+        import faster_whisper  # noqa: F401
+    except ImportError:
+        return False, _pip_hint("voice")
+    return True, "faster-whisper (the model downloads on first use)"
+
+
+def _probe_tts() -> tuple[bool, str]:
+    """What it would actually speak through, not what is merely importable.
+
+    pyttsx3 imports cleanly with no speech engine behind it and only fails when
+    you ask it to talk, so importing proves nothing here.
+    """
+    from .voice.tts import PrintSpeaker, load_tts
+
+    speaker = load_tts("auto")
+    if isinstance(speaker, PrintSpeaker):
+        hint = _apt_hint("espeak-ng") or "install a speech engine"
+        return False, f"nothing to speak through - {hint} (replies will be printed)"
+    return True, speaker.name
+
+
 def doctor(config: JarvisConfig) -> int:
     console.print("[bold]jarvis doctor[/bold]\n")
     ok = True
@@ -421,6 +490,16 @@ def doctor(config: JarvisConfig) -> int:
         ok = ok and good
         mark = "[green]✓[/green]" if good else "[red]✗[/red]"
         console.print(f"  {mark} {label}" + (f" [dim]{detail}[/dim]" if detail else ""))
+
+    # Checked first because nothing else can be right if this is wrong, and
+    # because Linux Mint 21 still ships 3.10 - where `tomllib` and
+    # `datetime.UTC` simply do not exist.
+    version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    check(
+        "python",
+        sys.version_info >= (3, 11),
+        version if sys.version_info >= (3, 11) else f"{version} - Jarvis needs 3.11 or newer",
+    )
 
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
     profile = Path.home() / ".config" / "anthropic"
@@ -477,20 +556,22 @@ def doctor(config: JarvisConfig) -> int:
     check("shell", shutil.which("bash") is not None, "bash")
 
     console.print("\n  [bold]optional[/bold]")
-    for label, module, extra in (
-        ("web UI", "fastapi", "web"),
-        ("audio capture", "sounddevice", "voice"),
-        ("speech to text", "faster_whisper", "voice"),
-        ("speech out", "pyttsx3", "voice"),
+    for label, probe in (
+        ("web UI", _probe_web),
+        ("audio capture", _probe_audio),
+        ("speech to text", _probe_stt),
+        ("speech out", _probe_tts),
     ):
+        # Every probe is wrapped: the command whose job is to diagnose a broken
+        # setup must never itself be what breaks. A missing system library
+        # raises OSError, not ImportError - that is exactly the case that used
+        # to take `jarvis doctor` down on a fresh Linux box.
         try:
-            __import__(module)
-            console.print(f"  [green]✓[/green] {label}")
-        except ImportError:
-            console.print(
-                f"  [yellow]-[/yellow] {label} "
-                f"[dim]pip install 'jarvis{escape('[' + extra + ']')}'[/dim]"
-            )
+            good, detail = probe()
+        except Exception as exc:  # noqa: BLE001 - a probe failing is a finding
+            good, detail = False, f"{type(exc).__name__}: {exc}"
+        mark = "[green]✓[/green]" if good else "[yellow]-[/yellow]"
+        console.print(f"  {mark} {label}" + (f" [dim]{escape(detail)}[/dim]" if detail else ""))
 
     console.print()
     console.print("[green]ready[/green]" if ok else "[red]something needs fixing[/red]")

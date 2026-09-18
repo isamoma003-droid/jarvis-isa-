@@ -545,12 +545,31 @@ def redact_uri(uri: str) -> str:
 
 
 def unreachable_message(uri: str, exc: Exception) -> str:
-    """What to tell a person whose database is not answering."""
+    """What to tell a person whose database is not answering.
+
+    Two different problems wear the same error. Pointing an Atlas user at
+    Docker is noise; telling someone with nothing installed to check their IP
+    allowlist is worse than noise, because it sounds like they configured
+    something wrong when they simply have no database yet.
+    """
     # pymongo's message carries a full topology dump; keep the first clause.
     reason = str(exc).split("(configured timeouts")[0].split(", Timeout:")[0]
     reason = reason.strip().rstrip(",") or type(exc).__name__
+    head = f"Could not reach MongoDB at {redact_uri(uri)} - {reason}."
+
+    local = any(host in uri for host in ("localhost", "127.0.0.1", "::1"))
+    if local:
+        return (
+            f"{head}\n"
+            "Nothing is listening there. Jarvis keeps memory, reminders and "
+            "notices in MongoDB - start one, or point MONGODB_URI somewhere else:\n"
+            "  docker run -d -p 27017:27017 -v jarvis-mongo:/data/db mongo:7\n"
+            "  export MONGODB_URI='mongodb+srv://USER:PASSWORD@cluster0.xxxxx.mongodb.net/'\n"
+            "There is no `mongodb` package on Debian, Ubuntu or Mint - apt will not help. "
+            "`jarvis doctor` tests the connection."
+        )
     return (
-        f"Could not reach MongoDB at {redact_uri(uri)} - {reason}.\n"
+        f"{head}\n"
         "Check MONGODB_URI, that the cluster is awake, and that this machine's "
         "IP is allowed in Atlas. `jarvis doctor` tests the connection."
     )

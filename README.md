@@ -32,6 +32,45 @@ pip install -e '.[voice]'     # + speech in/out
 pip install -e '.[all]'       # everything, plus test tooling
 ```
 
+Install the extras you want **in one command**. `pip install -e '.[web]'` followed
+by `pip install '.[voice]'` quietly replaces the editable install with a copy, and
+your edits stop taking effect.
+
+### On Linux Mint (or Ubuntu, Pop!_OS, LMDE)
+
+```bash
+./scripts/setup-linux.sh            # terminal + web
+./scripts/setup-linux.sh --voice    # ...and speech in/out
+```
+
+It checks your Python, installs the system libraries the wheels bind to, builds
+the virtualenv, and finishes by running `jarvis doctor`. Safe to run twice. The
+three things it exists to handle:
+
+- **Python 3.11.** Jarvis uses `tomllib` and `datetime.UTC`, both new in 3.11.
+  Mint 22.x and LMDE 6 are fine. **Mint 21.x ships 3.10**, so you need a newer
+  one alongside it — `sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt
+  install python3.12 python3.12-venv`. The script says so if it applies to you.
+- **Audio libraries.** `pip install 'jarvis[voice]'` succeeds and then
+  `sounddevice` fails at import with `PortAudio library not found`, because the
+  wheel binds to a system library Mint doesn't ship: `sudo apt install
+  libportaudio2`. Speech out needs `sudo apt install espeak-ng` — `pyttsx3`
+  imports perfectly happily with no engine behind it and only fails when you ask
+  it to talk. `jarvis doctor` names both, and tells them apart from "no
+  microphone plugged in".
+- **MongoDB.** There is no `mongodb` package on Mint — `apt install mongodb` will
+  not work. Use the [Atlas](https://www.mongodb.com/atlas) free M0 tier (nothing
+  to install, and your memory follows you between machines), or
+  `docker run -d -p 27017:27017 -v jarvis-mongo:/data/db mongo:7`. If you do add
+  MongoDB's own apt repo, note that their instructions use `lsb_release -cs`,
+  which on Mint returns a Mint codename (`wilma`, `virginia`) that MongoDB has
+  never published a repo for — use the `UBUNTU_CODENAME` from `/etc/os-release`
+  instead.
+
+Run `jarvis doctor` any time something looks wrong; it checks the Python version,
+credentials, the database, the workspace, the heartbeat config, and each optional
+dependency, and prints the exact command to fix what's missing.
+
 Then point it at two things:
 
 ```bash
