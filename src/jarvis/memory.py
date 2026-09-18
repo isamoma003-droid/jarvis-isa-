@@ -237,6 +237,12 @@ class MongoStore:
 
     def ping(self) -> None:
         """Raise StorageError unless the server answers."""
+        problem = uri_problem(self.uri)
+        if problem:
+            # Checked before dialling: a connection string with a placeholder
+            # still in it fails with a timeout that describes the symptom and
+            # not the cause.
+            raise StorageError(problem)
         try:
             self._client.admin.command("ping")
         except PyMongoError as exc:
@@ -537,6 +543,40 @@ class MongoStore:
 
     def set_paused(self, paused: bool) -> None:
         self.set_setting("paused", bool(paused))
+
+
+# Atlas hands you a template with angle-bracket placeholders in it. Pasting it
+# with one still unreplaced is the single most common first-run mistake, and
+# the driver's own error for it - a replica-set timeout - names the symptom
+# rather than the cause.
+_PLACEHOLDER = re.compile(r"<[^<>@/\s]+>")
+
+
+def uri_problem(uri: str) -> str | None:
+    """Something wrong with the connection string that needs no network to see."""
+    text = (uri or "").strip()
+    if not text:
+        return (
+            "No MongoDB connection string. Set MONGODB_URI - the Atlas free tier is "
+            "enough, or run one locally with Docker. `jarvis doctor` tests it."
+        )
+    if not text.startswith(("mongodb://", "mongodb+srv://")):
+        return (
+            f"MONGODB_URI must start with mongodb:// or mongodb+srv://, "
+            f"but starts with {text.split('://')[0][:24]!r}."
+        )
+    leftovers = _PLACEHOLDER.findall(text)
+    if leftovers:
+        names = ", ".join(dict.fromkeys(leftovers))
+        return (
+            f"The connection string still contains {names} - that is a placeholder "
+            "from the Atlas page, not a value.\n"
+            "Replace it with your database user's name and password (Atlas: "
+            "Database Access -> your user). If the password contains any of "
+            "@ : / ? # [ ] it has to be percent-encoded, or use a generated one "
+            "that avoids them."
+        )
+    return None
 
 
 def redact_uri(uri: str) -> str:

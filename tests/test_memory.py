@@ -269,3 +269,42 @@ def test_a_remote_cluster_gets_cluster_advice():
     assert "IP is allowed in Atlas" in message
     assert "docker run" not in message
     assert "hunter2" not in message            # the password never leaks into an error
+
+
+def test_an_unreplaced_atlas_placeholder_is_named_before_dialling():
+    """Atlas's copy button hands you a template. Leaving a placeholder in it is
+    the commonest first-run mistake, and the driver's own error for it is a
+    replica-set timeout that describes the symptom, not the cause."""
+    from jarvis.memory import uri_problem
+
+    problem = uri_problem("mongodb+srv://<db_username>:realpassword@cluster0.abc.mongodb.net/")
+    assert problem is not None
+    assert "<db_username>" in problem
+    assert "placeholder" in problem
+    assert "percent-encoded" in problem       # the next thing they will hit
+
+
+def test_a_complete_connection_string_has_no_complaint():
+    from jarvis.memory import uri_problem
+
+    assert uri_problem("mongodb+srv://isa:s3cret@cluster0.abc.mongodb.net/") is None
+    assert uri_problem("mongodb://localhost:27017") is None
+
+
+def test_an_empty_or_malformed_uri_says_so():
+    from jarvis.memory import uri_problem
+
+    assert "No MongoDB connection string" in (uri_problem("") or "")
+    assert "must start with" in (uri_problem("cluster0.abc.mongodb.net") or "")
+
+
+def test_ping_refuses_a_placeholder_without_a_network_round_trip(mongo_client):
+    from jarvis.memory import MongoStore, StorageError
+
+    store = MongoStore(
+        "mongodb+srv://<db_username>:pw@cluster0.abc.mongodb.net/",
+        client=mongo_client,
+        ensure_indexes=False,
+    )
+    with pytest.raises(StorageError, match="placeholder"):
+        store.ping()
