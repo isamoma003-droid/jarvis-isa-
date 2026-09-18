@@ -115,7 +115,8 @@ connection timeout that looks exactly like a broken network.
 jarvis                        # terminal REPL
 jarvis ask "what changed in this repo today?"
 jarvis web                    # http://127.0.0.1:8765
-jarvis voice                  # say "jarvis, ..."
+jarvis voice                  # press enter, speak, hear it answer
+jarvis selftest               # prove the database half works on your server
 jarvis notices                # what it surfaced while you were away
 jarvis pause / jarvis resume  # the kill switch
 jarvis log --totals           # what it did, and what it cost
@@ -164,6 +165,43 @@ Readable first: the chrome glows, the body text doesn't. It respects
 `prefers-reduced-motion` (every animation here is decoration, never a barrier)
 and drops the panel entirely on a phone, where the orb and the conversation are
 the product and telemetry is not.
+
+### Talking to it
+
+```bash
+jarvis voice            # press enter, speak, pause - it answers out loud
+jarvis voice --wake     # open mic, listening for "jarvis, ..."
+```
+
+**Press to talk is the default**, and the reason is worth knowing: a terminal
+reports keys pressed, never keys released. There is no key-up event to read, so
+true hold-to-talk needs OS-level input that breaks over SSH. One keypress opens
+the microphone and it closes itself when you stop speaking — you always know
+whether it is listening, because you told it, and it works everywhere.
+
+| | Default | With a key |
+|---|---|---|
+| Ears | faster-whisper, locally, no network | **Deepgram** when `DEEPGRAM_API_KEY` is set |
+| Mouth | `espeak-ng` / `pyttsx3` | **ElevenLabs** when `ELEVENLABS_API_KEY` *and* `JARVIS_TTS_VOICE` are set |
+
+Both sit behind one-function seams, so swapping either is a class and a line.
+The local pair needs no key and no internet; the hosted pair is faster and
+sounds like a presence rather than a machine reading.
+
+Three things make it feel responsive rather than laggy:
+
+- **it speaks as it thinks.** The model streams, and each sentence is spoken the
+  moment it is whole, rather than waiting for the whole answer. That is most of
+  the perceived latency gone;
+- **you can cut it off.** A keypress while it is talking stops it mid-sentence
+  and listens — an assistant you cannot interrupt stops being usable about a
+  minute after the novelty wears off;
+- **it shows you what it heard.** The transcript is printed next to the reply,
+  so when it answers the wrong question you can see whether the ears or the
+  brain missed.
+
+The typed interfaces are not going anywhere. They are how every change gets
+debugged without talking to a computer, and the fallback when audio misbehaves.
 
 ## What it can do
 
@@ -402,7 +440,7 @@ ruff check src tests
 ```
 
 An autouse fixture replaces the Mongo client for the whole suite, so no test
-can reach a real server even by accident. 203 tests, about five seconds.
+can reach a real server even by accident. 225 tests, about five seconds.
 
 ## License
 

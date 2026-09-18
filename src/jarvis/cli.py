@@ -465,11 +465,14 @@ def _probe_audio() -> tuple[bool, str]:
 
 
 def _probe_stt() -> tuple[bool, str]:
+    """Which transcriber would actually run, not merely what imports."""
+    if os.environ.get("DEEPGRAM_API_KEY", "").strip():
+        return True, "deepgram (DEEPGRAM_API_KEY is set)"
     try:
         import faster_whisper  # noqa: F401
     except ImportError:
-        return False, _pip_hint("voice")
-    return True, "faster-whisper (the model downloads on first use)"
+        return False, f"{_pip_hint('voice')}, or set DEEPGRAM_API_KEY"
+    return True, "faster-whisper, locally (the model downloads on first use)"
 
 
 def _probe_tts() -> tuple[bool, str]:
@@ -586,6 +589,27 @@ def doctor(config: JarvisConfig) -> int:
     console.print()
     console.print("[green]ready[/green]" if ok else "[red]something needs fixing[/red]")
     return 0 if ok else 1
+
+
+def selftest_command(config: JarvisConfig) -> int:
+    """Exercise the durable half against the database you will actually use."""
+    from .selftest import run
+
+    console.print("[bold]jarvis selftest[/bold] [dim]- against your real database[/dim]\n")
+    result = run(config)
+    for label, ok, detail in result.rows:
+        mark = "[green]✓[/green]" if ok else "[red]✗[/red]"
+        console.print(f"  {mark} {label}" + (f" [dim]{escape(detail)}[/dim]" if detail else ""))
+
+    console.print()
+    if result.ok:
+        console.print(
+            "[green]all good[/green] [dim]- memory, reminders, the inbox, the check "
+            "schedule and the kill switch all work on this server[/dim]"
+        )
+        return 0
+    console.print("[red]something is wrong[/red] [dim]- see the failed lines above[/dim]")
+    return 1
 
 
 def memory_command(config: JarvisConfig, args: argparse.Namespace) -> int:
@@ -770,12 +794,21 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--port", type=int)
     web.add_argument("--open", action="store_true", help="Open a browser window.")
 
-    voice = sub.add_parser("voice", help="Listen for the wake word and talk.")
+    voice = sub.add_parser("voice", help="Talk to Jarvis out loud.")
     voice.add_argument("--wake-word")
     voice.add_argument("--once", action="store_true", help="Handle one utterance and exit.")
-    voice.add_argument("--no-wake-word", action="store_true", help="Skip the wake word.")
+    voice.add_argument(
+        "--wake", action="store_true", help="Open mic listening for the wake word."
+    )
+    voice.add_argument(
+        "--press", action="store_true", help="Press enter to speak (the default)."
+    )
 
     sub.add_parser("doctor", help="Check the setup.")
+    sub.add_parser(
+        "selftest",
+        help="Prove memory, reminders, notices and the schedule work on your database.",
+    )
 
     memory = sub.add_parser("memory", help="Inspect what Jarvis remembers.")
     memory.add_argument("query", nargs="?")
@@ -823,6 +856,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "doctor":
             return doctor(config)
+        if args.command == "selftest":
+            return selftest_command(config)
         if args.command == "memory":
             return memory_command(config, args)
         if args.command == "reminders":
@@ -844,7 +879,8 @@ def main(argv: list[str] | None = None) -> int:
 
             if args.wake_word:
                 config.wake_word = args.wake_word
-            return run_voice(config, once=args.once, use_wake_word=not args.no_wake_word)
+            wake = True if args.wake else (False if args.press else None)
+            return run_voice(config, once=args.once, use_wake_word=wake)
         return repl(config)
     except JarvisError as exc:
         console.print(f"[red]{exc}[/red]")

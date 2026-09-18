@@ -15,6 +15,8 @@ from .memory import DEFAULT_DB, DEFAULT_URI
 DEFAULT_MODEL = "claude-opus-5"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 APPROVAL_POLICIES = ("auto", "prompt", "deny")
+VOICE_INPUTS = ("press", "wake")
+STT_BACKENDS = ("auto", "deepgram", "whisper")
 
 
 def credentials_available() -> bool:
@@ -162,8 +164,16 @@ class JarvisConfig:
 
     # --- voice ---
     wake_word: str = "jarvis"
-    stt_model: str = "base.en"
-    tts_backend: str = "auto"
+    # How you start a turn. "press" opens the mic on a keypress and closes it
+    # when you stop speaking; "wake" is the open-mic loop. A terminal cannot
+    # see a key being released, so there is no true hold-to-talk here.
+    voice_input: str = "press"
+    stt_backend: str = "auto"          # auto | deepgram | whisper
+    stt_model: str = "base.en"         # the whisper size
+    deepgram_model: str = "nova-3"
+    tts_backend: str = "auto"          # auto | elevenlabs | pyttsx3 | say | espeak | print
+    tts_voice: str = ""                # an ElevenLabs voice id
+    tts_model: str = "eleven_turbo_v2_5"
     voice_silence_seconds: float = 1.2
     voice_max_seconds: float = 30.0
 
@@ -190,6 +200,14 @@ class JarvisConfig:
             raise ConfigError("max_iterations must be at least 1")
         if self.heartbeat_seconds < 1:
             raise ConfigError("heartbeat_seconds must be at least 1")
+        if self.voice_input not in VOICE_INPUTS:
+            raise ConfigError(
+                f"voice_input must be one of {VOICE_INPUTS}, got {self.voice_input!r}"
+            )
+        if self.stt_backend not in STT_BACKENDS:
+            raise ConfigError(
+                f"stt_backend must be one of {STT_BACKENDS}, got {self.stt_backend!r}"
+            )
         # Validate the heartbeat settings here, at load, rather than letting a
         # typo in the config file surface as a dead background thread hours later.
         from .heartbeat import CheckError, load_checks, parse_quiet_hours
@@ -244,6 +262,11 @@ class JarvisConfig:
             "tts_backend": "JARVIS_TTS_BACKEND",
             "web_host": "JARVIS_WEB_HOST",
             "quiet_hours": "JARVIS_QUIET_HOURS",
+            "voice_input": "JARVIS_VOICE_INPUT",
+            "stt_backend": "JARVIS_STT_BACKEND",
+            "deepgram_model": "JARVIS_DEEPGRAM_MODEL",
+            "tts_voice": "JARVIS_TTS_VOICE",
+            "tts_model": "JARVIS_TTS_MODEL",
         }
         for key, env_name in env_map.items():
             raw = os.environ.get(env_name)

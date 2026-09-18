@@ -1,23 +1,41 @@
-"""The voice loop: wake word, transcribe, answer, speak.
+"""The voice loop: press, speak, hear it answer.
 
-Speech is answered from the final message rather than token by token - a
-half-formed sentence read aloud is worse than a short wait.
+A thin adapter, not a second assistant. Input arrives as a transcript instead
+of a typed line and output is spoken as well as printed; between those two ends
+it is `Session.send`, the same brain the terminal and the browser use. If this
+file ever grows agent logic, that is the bug.
+
+Three things make it feel alive rather than laggy:
+
+- the mic opens when you say so, and closes when you stop talking, so there is
+  never a question of whether it is listening;
+- it speaks each sentence as the model finishes writing it, instead of waiting
+  for the whole answer;
+- a keypress cuts it off mid-sentence.
 """
 
 from __future__ import annotations
 
 import re
+import threading
 from typing import Any
 
 from rich.console import Console
 from rich.markup import escape
 
 from ..config import JarvisConfig
-from ..events import ErrorEvent, NoticeSurfaced, ReminderFired, ToolStarted, TurnFinished
+from ..events import (
+    ErrorEvent,
+    NoticeSurfaced,
+    ReminderFired,
+    TextDelta,
+    ToolStarted,
+    TurnFinished,
+)
 from ..session import Session
-from .audio import Recording, calibrate, record_utterance, wait_for_quiet
-from .stt import load_stt
-from .tts import load_tts, speakable
+from .audio import KeyWatcher, Recording, calibrate, record_utterance, wait_for_quiet
+from .stt import TranscriptionError, load_stt
+from .tts import SentenceStream, load_tts, speakable
 
 console = Console()
 
@@ -51,27 +69,41 @@ def strip_wake_word(text: str, wake_word: str) -> str | None:
 class VoiceLoop:
     """Owns the microphone, the speaker, and one session."""
 
-    def __init__(self, config: JarvisConfig, use_wake_word: bool = True) -> None:
+    def __init__(
+        self,
+        config: JarvisConfig,
+        use_wake_word: bool | None = None,
+        session: Session | None = None,
+        speaker: Any = None,
+        transcriber: Any = None,
+        recorder: Any = None,
+    ) -> None:
         self.config = config
+        if use_wake_word is None:
+            use_wake_word = config.voice_input == "wake"
         self.use_wake_word = use_wake_word
-        self.speaker = load_tts(config.tts_backend)
-        self.transcriber = load_stt(config.stt_model)
-        self.session = Session(config, interface="voice")
+        # Injectable so a test can drive a whole turn without a microphone.
+        self.speaker = speaker or load_tts(config.tts_backend, config)
+        self.transcriber = transcriber or load_stt(config)
+        self.recorder = recorder or record_utterance
+        self.session = session or Session(config, interface="voice")
         self.session.context.confirm = self.spoken_confirm
         self.threshold = 0.02
+        self._interrupted = threading.Event()
 
     # -- speaking ------------------------------------------------------
-    def say(self, text: str) -> None:
+    def say(self, text: str, show: bool = True) -> None:
         spoken = speakable(text)
         if not spoken:
             return
-        console.print(f"[cyan]jarvis[/cyan] {escape(spoken)}")
+        if show:
+            console.print(f"[cyan]jarvis[/cyan] {escape(spoken)}")
         self.speaker.say(spoken)
         wait_for_quiet()
 
     # -- listening -----------------------------------------------------
     def listen(self, start_timeout: float | None = None) -> str:
-        recording: Recording = record_utterance(
+        recording: Recording = self.recorder(
             threshold=self.threshold,
             silence_seconds=self.config.voice_silence_seconds,
             max_seconds=self.config.voice_max_seconds,
@@ -79,10 +111,14 @@ class VoiceLoop:
         )
         if not recording:
             return ""
-        return self.transcriber.transcribe(recording.samples)
+        try:
+            return self.transcriber.transcribe(recording.samples)
+        except TranscriptionError as exc:
+            console.print(f"  [red]{escape(str(exc))}[/red]")
+            return ""
 
     def spoken_confirm(self, action: str, detail: str) -> bool:
-        """Approval, asked out loud."""
+        """Approval, asked out loud. The gate is the same one the terminal uses."""
         self.say(f"Do you want me to {action}? {detail}")
         for _ in range(2):
             answer = normalize(self.listen(start_timeout=10.0))
@@ -99,16 +135,56 @@ class VoiceLoop:
 
     # -- turns ---------------------------------------------------------
     def answer(self, question: str) -> None:
-        answer_text = ""
-        for event in self.session.send(question):
-            if isinstance(event, ToolStarted):
-                console.print(f"  [dim]⚙ {escape(event.name)}[/dim]")
-            elif isinstance(event, ErrorEvent):
-                console.print(f"  [red]{escape(event.message)}[/red]")
-                answer_text = answer_text or "Something went wrong there."
-            elif isinstance(event, TurnFinished):
-                answer_text = event.text or answer_text
-        self.say(answer_text or "I don't have an answer for that.")
+        """Run one turn, speaking each sentence as it is finished.
+
+        The model streams; sentences are spoken the moment they are whole. That
+        turns "wait for the whole answer, then start talking" into "start
+        talking almost immediately", which is most of the perceived latency.
+        """
+        self._interrupted.clear()
+        watcher = KeyWatcher(self.barge_in)
+        watcher.start()
+
+        stream = SentenceStream()
+        spoken_any = False
+        failed = ""
+
+        try:
+            for event in self.session.send(question):
+                if self._interrupted.is_set():
+                    self.session.interrupt()
+                    break
+                if isinstance(event, TextDelta):
+                    console.print(event.text, end="", markup=False, highlight=False)
+                    for sentence in stream.feed(event.text):
+                        self.speaker.say(speakable(sentence))
+                        spoken_any = True
+                        if self._interrupted.is_set():
+                            break
+                elif isinstance(event, ToolStarted):
+                    console.print(f"\n  [dim]⚙ {escape(event.name)}[/dim]")
+                elif isinstance(event, ErrorEvent):
+                    console.print(f"\n  [red]{escape(event.message)}[/red]")
+                    failed = "Something went wrong there."
+                elif isinstance(event, TurnFinished):
+                    console.print()
+        finally:
+            watcher.stop()
+
+        if self._interrupted.is_set():
+            console.print("  [yellow]stopped[/yellow]")
+            return
+
+        remainder = stream.flush()
+        if remainder:
+            self.say(remainder, show=not spoken_any)
+        elif not spoken_any:
+            self.say(failed or "I don't have an answer for that.")
+
+    def barge_in(self) -> None:
+        """A keypress while it is talking means: stop, I am speaking now."""
+        self._interrupted.set()
+        self.speaker.stop()
 
     def on_surfaced(self, event: Any) -> None:
         """What the heartbeat pushes, said out loud."""
@@ -119,21 +195,63 @@ class VoiceLoop:
             self.say(f"{lead}: {event.text}")
 
     # -- the loop ------------------------------------------------------
-    def run(self, once: bool = False) -> int:
-        wake = (
-            f"wake word: {self.config.wake_word}" if self.use_wake_word else "no wake word"
+    def _banner(self) -> None:
+        how = (
+            f"wake word: {self.config.wake_word}"
+            if self.use_wake_word
+            else "press enter to speak"
         )
         console.print(
-            f"[bold cyan]◈ jarvis is listening[/bold cyan] "
-            f"[dim]({self.speaker.name} · whisper {self.config.stt_model} · "
-            f"{wake})[/dim]"
+            f"[bold cyan]◈ jarvis[/bold cyan] "
+            f"[dim]({self.transcriber.name} · {self.speaker.name} · {how})[/dim]"
         )
+
+    def _prepare(self) -> None:
         console.print("[dim]calibrating the room…[/dim]")
         try:
             self.threshold = calibrate()
         except Exception as exc:
             console.print(f"[yellow]could not calibrate ({exc}); using a default gate[/yellow]")
-        console.print("[dim]ready - Ctrl-C to stop[/dim]\n")
+
+    def one_turn(self) -> bool:
+        """Wait for a turn, run it. False means the user wants out."""
+        if not self.use_wake_word:
+            from .audio import wait_for_key
+
+            if not wait_for_key("[press enter to speak]"):
+                return False
+            # A sign the instant the key lands: silence here reads as "it broke".
+            console.print("[bold cyan]● listening[/bold cyan] [dim]— speak, then pause[/dim]")
+
+        heard = self.listen()
+        if not heard:
+            if not self.use_wake_word:
+                console.print("[dim]heard nothing[/dim]")
+            return True
+
+        question = heard
+        if self.use_wake_word:
+            remainder = strip_wake_word(heard, self.config.wake_word)
+            if remainder is None:
+                return True  # not addressed to Jarvis
+            if not remainder:
+                self.say("Yes?")
+                remainder = self.listen(start_timeout=6.0)
+                if not remainder:
+                    return True
+                heard = remainder
+            question = remainder
+
+        # Always show what it thought it heard: when it answers the wrong
+        # question, this is what tells you whether the ears or the brain missed.
+        console.print(f"[dim]heard:[/dim] {escape(heard)}")
+        self.answer(question)
+        return True
+
+    def run(self, once: bool = False) -> int:
+        self._banner()
+        self._prepare()
+        console.print("[dim]ready — Ctrl-C to stop[/dim]\n")
 
         self.session.start_heartbeat(self.on_surfaced)
         for held in self.session.catch_up():
@@ -141,25 +259,8 @@ class VoiceLoop:
 
         try:
             while True:
-                heard = self.listen()
-                if not heard:
-                    continue
-                console.print(f"[dim]heard:[/dim] {escape(heard)}")
-
-                question = heard
-                if self.use_wake_word:
-                    remainder = strip_wake_word(heard, self.config.wake_word)
-                    if remainder is None:
-                        continue  # not addressed to Jarvis
-                    if not remainder:
-                        self.say("Yes?")
-                        remainder = self.listen(start_timeout=6.0)
-                        if not remainder:
-                            continue
-                        console.print(f"[dim]heard:[/dim] {escape(remainder)}")
-                    question = remainder
-
-                self.answer(question)
+                if not self.one_turn():
+                    return 0
                 if once:
                     return 0
         except KeyboardInterrupt:
@@ -169,5 +270,5 @@ class VoiceLoop:
             self.session.close()
 
 
-def run_voice(config: JarvisConfig, once: bool = False, use_wake_word: bool = True) -> int:
+def run_voice(config: JarvisConfig, once: bool = False, use_wake_word: bool | None = None) -> int:
     return VoiceLoop(config, use_wake_word=use_wake_word).run(once=once)

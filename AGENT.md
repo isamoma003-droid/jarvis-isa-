@@ -39,8 +39,8 @@ restating the request, no summary of a summary. This lives in `prompts.py`
 | Terminal | `rich` | |
 | Web | FastAPI + WebSocket | |
 | Interface design | the [Trillion](https://hellotrillion.ai) language | Near-black ground, one teal accent, a living orb, conversation floating over it. Amber is reserved for the confirmation gate so the one moment it asks me for something never looks like anything else. |
-| Ears | **Deepgram** *(decided, not yet built)* | Streams; keeps the gap between releasing the key and being understood short. Local `faster-whisper` stays as the offline fallback. |
-| Mouth | **ElevenLabs** *(decided, not yet built)* | Natural enough to feel like a presence. `pyttsx3`/`say` stay as the offline fallback. |
+| Ears | **Deepgram** | Streams; keeps the gap between releasing the key and being understood short. Local `faster-whisper` stays as the offline fallback. |
+| Mouth | **ElevenLabs** | Natural enough to feel like a presence. `pyttsx3`/`say` stay as the offline fallback. |
 
 Runs laptop-first. The heartbeat (Tier 5) is deliberately separable so moving it
 to an always-on host is a relocation, not a rewrite.
@@ -49,8 +49,10 @@ to an always-on host is a relocation, not a rewrite.
 
 - **Typed**, in the terminal REPL or the browser. This path stays alive forever —
   it is how every future change gets debugged without talking to a computer.
-- **Push-to-talk** — hold a key, speak, release. *Decided; Tier 3 work.* This
-  becomes the default for `jarvis voice`.
+- **Press-to-talk** — a keypress opens the mic, and it closes when you stop
+  speaking. The default for `jarvis voice`. Hold-to-talk was the intent, but a
+  terminal has no key-up event; this keeps the property that matters (you always
+  know it is listening) and still works over SSH.
 - **Wake word** — the current open-mic loop, kept behind a flag for when I'm
   across the room.
 
@@ -86,7 +88,7 @@ assume it.
 |---|---|---|
 | 1 | The brain — streaming text conversation loop | Done |
 | 2 | The hands — tool registry, typed inputs, errors back to the model | Done |
-| 3 | The ears and mouth — voice in, voice out | **Partial.** Wake word, local STT/TTS, speaks only after the turn ends. Push-to-talk, Deepgram, ElevenLabs, streaming speech and barge-in are the next tier. |
+| 3 | The ears and mouth — voice in, voice out | Done. Press-to-talk by default (a terminal cannot see a key released, so hold-to-talk would need OS-level input), Deepgram and ElevenLabs behind seams with the local pair as fallback, sentences spoken as they finish, and a keypress cuts it off. |
 | 4 | The memory — durable facts across restarts | Done |
 | 5 | The heartbeat — scheduled checks, held notices, quiet hours | Done |
 | 6 | The rails — confirmation gate, untrusted content, audit log, kill switch | Done |

@@ -6,6 +6,7 @@ the transcript for its name. One dependency fewer, and it works offline.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -93,3 +94,77 @@ def record_utterance(
 def wait_for_quiet(seconds: float = 0.25) -> None:
     """Small pause so the speaker's own output is not recorded as input."""
     time.sleep(seconds)
+
+
+# ----------------------------------------------------------------------
+# push to talk
+# ----------------------------------------------------------------------
+# A terminal reports keys pressed, never keys released - there is no key-up
+# event to read. True hold-to-talk therefore needs OS-level input (pynput, an
+# X11 or Wayland connection), which breaks over SSH and adds a dependency for
+# something the terminal can nearly do already.
+#
+# So "press to talk" is the default: one keypress opens the microphone, and it
+# closes itself when you stop speaking. That keeps the property that actually
+# matters - you always know whether it is listening, because you told it - and
+# it works everywhere, including over SSH.
+
+
+def wait_for_key(prompt: str = "press enter to speak") -> bool:
+    """Block until the user asks to talk. False means they want out."""
+    try:
+        input(f"\r{prompt} ")
+        return True
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+class KeyWatcher:
+    """Watches for a keypress in the background, for barge-in.
+
+    While Jarvis is speaking, one keypress means "stop, I am talking now". The
+    thread is a daemon and is never joined: a blocking stdin read cannot be
+    cancelled, so the alternative is hanging on exit.
+    """
+
+    def __init__(self, on_press: Any) -> None:
+        self.on_press = on_press
+        self._active = threading.Event()
+
+    def start(self) -> None:
+        self._active.set()
+
+        def watch() -> None:
+            try:
+                input()
+            except (EOFError, KeyboardInterrupt, OSError):
+                return
+            if self._active.is_set():
+                self.on_press()
+
+        threading.Thread(target=watch, name="jarvis-bargein", daemon=True).start()
+
+    def stop(self) -> None:
+        self._active.clear()
+
+
+def record_push_to_talk(
+    threshold: float,
+    silence_seconds: float = 1.0,
+    max_seconds: float = 60.0,
+    announce: Any = None,
+) -> Recording:
+    """One utterance, starting the moment the key is pressed.
+
+    `start_timeout=None` and no energy gate on the way in: you already said you
+    were speaking, so waiting for a loud enough sound would only add a way for
+    the first word to be clipped.
+    """
+    if announce:
+        announce()
+    return record_utterance(
+        threshold=threshold,
+        silence_seconds=silence_seconds,
+        max_seconds=max_seconds,
+        start_timeout=None,
+    )
