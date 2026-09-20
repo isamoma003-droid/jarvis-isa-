@@ -356,6 +356,16 @@ moving it to an always-on host is a relocation, not a rewrite.
   tokens, and `*_API_KEY=` style assignments in a recorded command. Pattern
   matching is a net rather than a guarantee, so treat the log as sensitive
   anyway — but the cases that actually occur are covered.
+- **The gate decides on tokens, not on prefixes.** What may run unasked is
+  judged by parsing the command, because `echo ok` followed by a newline and
+  `rm -rf ~` starts with `echo` and is not an `echo`. Newlines, backslash
+  continuations, `find`'s `-delete`/`-exec`, and `env` used as a launcher all
+  ask first. `ls`, `git status` and `grep` still do not.
+- **The browser UI checks who is asking.** Same-origin policy does not apply to
+  WebSockets, so any page you happen to visit could otherwise open
+  `ws://127.0.0.1:8765/ws` and drive the agent — and since approvals are
+  answered over that same socket, it would approve its own actions. The
+  handshake validates `Origin` against the address it is served on.
 - **A kill switch.** `jarvis pause` (or `/pause`, or **hold** in the HUD) stops
   every proactive behaviour at once — checks, reminders, background work — while
   you can still talk to it. The flag lives in the database, so it survives a
@@ -444,7 +454,7 @@ ruff check src tests
 ```
 
 An autouse fixture replaces the Mongo client for the whole suite, so no test
-can reach a real server even by accident. 235 tests, about five seconds.
+can reach a real server even by accident. 262 tests, about five seconds.
 
 ## License
 

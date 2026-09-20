@@ -9,6 +9,7 @@ sandboxed by pattern matching.
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from typing import Any
 
@@ -30,19 +31,47 @@ REFUSED = [
 ]
 
 # Commands that only look at things - no approval prompt for these.
+#
+# `env` is deliberately absent: it runs whatever you pass it, so `env rm -rf x`
+# would be classified as harmless. Anything on this list must be incapable of
+# executing another program.
 READ_ONLY = {"ls", "cat", "head", "tail", "pwd", "whoami", "date", "df", "du", "wc",
-             "grep", "rg", "find", "which", "echo", "env", "uname", "ps", "stat",
+             "grep", "rg", "find", "which", "echo", "uname", "ps", "stat",
              "git status", "git log", "git diff", "git show", "git branch"}
+
+# What turns one command into several, or into something else. The newline is
+# the one that matters most: the handler runs `bash -lc`, which executes every
+# line, so a command whose *first* line looks harmless is not a harmless
+# command. A backslash continues a line, which is the same trick spelled
+# differently.
+UNSAFE_CHARS = ">|&;$`\n\r\\"
+
+# `find` earns its place on the list - looking for files is a constant - but it
+# can also delete and execute. These are its action flags.
+FIND_ACTIONS = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls")
 
 
 def _is_read_only(command: str) -> bool:
+    """Whether this may run without asking. Wrong in only one safe direction.
+
+    A false "needs approval" costs one keypress. A false "read-only" runs
+    something destructive in silence, so everything ambiguous answers False.
+
+    Classification is on tokens, never on a string prefix: a prefix match says
+    `find . -delete` is a `find`, and says nothing about what follows.
+    """
     stripped = command.strip()
-    if any(char in stripped for char in ">|&;$`"):
+    if not stripped or any(char in stripped for char in UNSAFE_CHARS):
         return False
-    return any(
-        stripped == prefix or stripped.startswith(prefix + " ")
-        for prefix in READ_ONLY
-    )
+    try:
+        tokens = shlex.split(stripped)
+    except ValueError:
+        return False  # unbalanced quotes: do not guess at what bash will do
+    if not tokens:
+        return False
+    if tokens[0] == "find" and any(token.startswith(FIND_ACTIONS) for token in tokens):
+        return False
+    return any(" ".join(tokens[:size]) in READ_ONLY for size in (2, 1))
 
 
 def run_shell(ctx: ToolContext, args: dict[str, Any]) -> str:

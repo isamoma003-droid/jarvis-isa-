@@ -375,3 +375,63 @@ def test_ordinary_commands_are_left_alone(line):
     from jarvis.audit import redact
 
     assert redact(line) == line
+
+
+# --- the approval gate cannot be skipped by classification -----------
+@pytest.mark.parametrize(
+    ("label", "command"),
+    [
+        # `bash -lc` runs every line, so what the first line looks like says
+        # nothing about what the command does.
+        ("a second line after a harmless first", "echo ok\nrm -rf ~/Documents"),
+        ("a second line, chmod", "echo ok\nchmod -R 000 /home/user"),
+        ("a second line, raw socket exfiltration", 'echo ok\npython3 -c "import socket"'),
+        ("a backslash line continuation", "ls -la \\\nrm -rf x"),
+        # find looks, but it also deletes and executes.
+        ("find -delete", "find . -type f -delete"),
+        ("find -exec", "find . -type f -exec chmod 777 {} +"),
+        ("find -execdir", "find . -execdir rm {} +"),
+        # env runs whatever you hand it.
+        ("env as a launcher", "env rm -rf /tmp/x"),
+        ("env with an assignment", "env FOO=1 python3 -c 'print(1)'"),
+        # If we cannot parse it, we cannot classify it.
+        ("unbalanced quoting", "cat 'unbalanced"),
+    ],
+)
+def test_a_state_changing_command_cannot_pose_as_read_only(label, command, context, workspace):
+    """The gate is only as good as the thing deciding what needs it.
+
+    Each of these ran with no prompt at all: the classifier matched a string
+    prefix, which says what a command starts with and nothing about what it
+    does. Found by an independent review after my own adversarial pass missed
+    them - my payloads happened to contain a character the old check caught.
+    """
+    from jarvis.tools.shell import _is_read_only
+
+    assert _is_read_only(command) is False, f"{label}: still classified read-only"
+
+    context.config.approval = "prompt"
+    context.confirm = lambda action, detail: False
+    with pytest.raises(ApprovalDenied):
+        shell.run_shell(context, {"command": command})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls -la", "cat notes.md", "git status", "git log --oneline -5",
+        "grep -rn TODO src", 'find . -name "*.py"', "wc -l setup.py",
+        "ps aux", "echo hello", "head -20 README.md", "which python3", "df -h",
+    ],
+)
+def test_ordinary_looking_around_still_needs_no_permission(command):
+    """A gate that asks about `ls` is a gate people learn to click through."""
+    from jarvis.tools.shell import _is_read_only
+
+    assert _is_read_only(command) is True
+
+
+def test_env_is_not_on_the_read_only_list():
+    from jarvis.tools.shell import READ_ONLY
+
+    assert "env" not in READ_ONLY   # it executes whatever follows it

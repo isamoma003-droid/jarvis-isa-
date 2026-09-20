@@ -36,6 +36,12 @@ STATIC = Path(__file__).parent / "static"
 APPROVAL_TIMEOUT = 180.0
 
 
+def allowed_origins(host: str, port: int) -> set[str]:
+    """Where a browser may legitimately open the socket from."""
+    names = {host, "localhost", "127.0.0.1", "[::1]"}
+    return {f"{scheme}://{name}:{port}" for name in names for scheme in ("http", "https")}
+
+
 @dataclass
 class Pending:
     """An approval request waiting on the browser."""
@@ -78,8 +84,23 @@ def create_app(config: JarvisConfig, session_factory: Any = None) -> Any:
             "approval": config.approval,
         }
 
+    permitted = allowed_origins(config.web_host, config.web_port)
+
     @app.websocket("/ws")
     async def socket(websocket: WebSocket) -> None:
+        # Same-origin policy does not apply to WebSockets: any page the user
+        # happens to visit can open ws://127.0.0.1:<port>/ws and drive the
+        # agent. Worse, approvals are answered over this same socket, so such a
+        # page would approve its own actions and the confirmation gate would
+        # protect nobody. The server has to check who is asking.
+        #
+        # A missing Origin means it is not a browser - curl, a test client, a
+        # script - and a browser cannot suppress the header, so absence is safe
+        # to allow while any foreign value is not.
+        origin = websocket.headers.get("origin")
+        if origin is not None and origin not in permitted:
+            await websocket.close(code=1008, reason="origin not allowed")
+            return
         await websocket.accept()
         loop = asyncio.get_running_loop()
         outbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -226,8 +247,11 @@ def serve(
     _require_fastapi()
     import uvicorn
 
-    host = host or config.web_host
-    port = port or config.web_port
+    # Set on the config before the app is built: the allowed-origin set is
+    # derived from these, so a --port override has to land here too.
+    config.web_host = host or config.web_host
+    config.web_port = port or config.web_port
+    host, port = config.web_host, config.web_port
     app = create_app(config)
 
     url = f"http://{host}:{port}"

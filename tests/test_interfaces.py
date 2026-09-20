@@ -320,3 +320,53 @@ def test_doctor_survives_every_optional_probe_failing(monkeypatch, tmp_path, cap
     assert cli.main(["doctor"]) in (0, 1)          # reports, never raises
     printed = capsys.readouterr().out
     assert "some system library is missing" in printed
+
+
+# --- the socket checks who is asking ---------------------------------
+def test_a_foreign_page_cannot_open_the_websocket(web_client):
+    """Same-origin policy does not apply to WebSockets.
+
+    Any page the user visits can open ws://127.0.0.1:8765/ws. Approvals are
+    answered over that same socket, so without this check such a page would
+    drive the agent *and* approve its own actions - the confirmation gate would
+    be protecting nobody.
+    """
+    from starlette.websockets import WebSocketDisconnect
+
+    client, holder = web_client
+    holder["client"] = FakeClient([])
+
+    # The handshake is refused, so the connection never opens: no `ready`, no
+    # chance to send a message or approve anything.
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            "/ws", headers={"origin": "https://evil.example.com"}
+        ) as socket:
+            socket.receive_json()
+
+
+def test_the_real_page_still_connects(web_client):
+    client, holder = web_client
+    holder["client"] = FakeClient([])
+
+    with client.websocket_connect("/ws", headers={"origin": "http://127.0.0.1:8765"}) as socket:
+        assert socket.receive_json()["kind"] == "ready"
+
+
+def test_a_non_browser_client_with_no_origin_is_allowed(web_client):
+    # curl, a script, this test: no Origin header. A browser cannot suppress
+    # it, so absence is not something an attacking page can fake.
+    client, holder = web_client
+    holder["client"] = FakeClient([])
+
+    with client.websocket_connect("/ws") as socket:
+        assert socket.receive_json()["kind"] == "ready"
+
+
+def test_the_allowed_origin_set_follows_the_configured_port():
+    from jarvis.web.server import allowed_origins
+
+    permitted = allowed_origins("127.0.0.1", 9000)
+    assert "http://localhost:9000" in permitted
+    assert "http://127.0.0.1:9000" in permitted
+    assert "http://localhost:8765" not in permitted   # a different port is a different origin
