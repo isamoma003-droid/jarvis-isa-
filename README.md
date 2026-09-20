@@ -352,6 +352,10 @@ moving it to an always-on host is a relocation, not a rewrite.
 - **An audit trail.** Every tool call, approval, notice, check and turn is
   appended to `<data_dir>/audit.jsonl`, with a running cost estimate — a runaway
   loop shows up in `jarvis log --totals` long before it shows up on a bill.
+  Credentials are scrubbed on the way in: connection-string passwords, bearer
+  tokens, and `*_API_KEY=` style assignments in a recorded command. Pattern
+  matching is a net rather than a guarantee, so treat the log as sensitive
+  anyway — but the cases that actually occur are covered.
 - **A kill switch.** `jarvis pause` (or `/pause`, or **hold** in the HUD) stops
   every proactive behaviour at once — checks, reminders, background work — while
   you can still talk to it. The flag lives in the database, so it survives a
@@ -440,7 +444,7 @@ ruff check src tests
 ```
 
 An autouse fixture replaces the Mongo client for the whole suite, so no test
-can reach a real server even by accident. 225 tests, about five seconds.
+can reach a real server even by accident. 235 tests, about five seconds.
 
 ## License
 

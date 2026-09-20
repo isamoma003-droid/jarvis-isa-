@@ -312,3 +312,66 @@ def test_the_kill_switch_is_durable_and_shared(config, store, workspace, mongo_c
         # And the conversation still works while everything proactive is held.
         events = list(session.send("are you there?"))
         assert events[-1].text == "still here"
+
+
+# --- secrets must not reach the audit log ----------------------------
+def test_a_credential_in_a_tool_argument_is_redacted(tmp_path):
+    """Found by attacking the running code, not by reading it.
+
+    The audit log is long-lived plain text read with `grep`, and it records
+    tool arguments verbatim. `curl -H "Authorization: Bearer ..."` is an
+    ordinary thing for the agent to run, and the token was landing in the file.
+    """
+    log = AuditLog(tmp_path / "audit.jsonl", session_id="s1")
+    log.tool(
+        "run_shell",
+        {"command": 'curl -H "Authorization: Bearer sk-ant-SECRET123" https://api.example.com'},
+        ok=True,
+        ms=5,
+    )
+    written = (tmp_path / "audit.jsonl").read_text()
+
+    assert "sk-ant-SECRET123" not in written
+    assert "Bearer ***" in written
+    assert "api.example.com" in written      # the rest of the line survives
+
+
+def test_a_connection_string_password_is_redacted(tmp_path):
+    log = AuditLog(tmp_path / "audit.jsonl")
+    log.approval("connect", "mongodb+srv://isa:HUNTER2@cluster0.abc.mongodb.net/", granted=True)
+    written = (tmp_path / "audit.jsonl").read_text()
+
+    assert "HUNTER2" not in written
+    assert "cluster0.abc.mongodb.net" in written   # still diagnosable
+
+
+@pytest.mark.parametrize(
+    ("line", "must_not_contain"),
+    [
+        ("export DEEPGRAM_API_KEY=abc123def456", "abc123def456"),
+        ("ELEVENLABS_API_KEY: xi-9f8e7d6c5b4a", "xi-9f8e7d6c5b4a"),
+        ("psql --password=hunter2 -h db", "hunter2"),
+        ("curl -H 'Token ghp_0123456789abcdefghij'", "ghp_0123456789abcdefghij"),
+    ],
+)
+def test_the_shapes_a_secret_actually_arrives_in(line, must_not_contain):
+    from jarvis.audit import redact
+
+    assert must_not_contain not in redact(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "git push origin main",
+        "ls -la /home/isa/projects",
+        "pytest -q tests/test_rails.py",
+        "read_file path=src/jarvis/agent.py",
+    ],
+)
+def test_ordinary_commands_are_left_alone(line):
+    """A redactor that mangles normal output makes the log useless, which is
+    the same as not having one."""
+    from jarvis.audit import redact
+
+    assert redact(line) == line

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -38,6 +39,41 @@ CACHE_READ_MULTIPLIER = 0.1
 DEFAULT_PRICE = (5.00, 25.00)
 
 MAX_DETAIL = 400
+
+# The log is long-lived, plain text, and read with `grep`. Anything secret that
+# reaches it stays there. Tool arguments and approval details are the risk: a
+# shell command is recorded verbatim, and `curl -H "Authorization: Bearer ..."`
+# is an ordinary thing for the agent to run.
+_SECRETS: list[tuple[re.Pattern[str], str]] = [
+    # user:password@host in any connection string
+    (re.compile(r"(://[^:/@\s]+:)([^@\s]+)(@)"), r"\1***\3"),
+    # Authorization: Bearer <token> / Token <token>, however it is quoted
+    (re.compile(r"\b(Bearer|Token)\s+[^\s'\"]+", re.I), r"\1 ***"),
+    # provider keys by their own prefixes
+    (re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"), "sk-***"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{8,}"), "xox-***"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{16,}"), "gh_***"),
+    # NAME=value and NAME: value where the name says it is a secret
+    (
+        re.compile(
+            r"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PWD))"
+            r"(\s*[=:]\s*)(['\"]?)([^\s'\",}]+)"
+        ),
+        r"\1\2\3***",
+    ),
+]
+
+
+def redact(text: str) -> str:
+    """Strip anything that looks like a credential out of a log line.
+
+    Pattern matching, so it is a net rather than a guarantee - but the cases it
+    catches are the ones that actually occur: a key in a shell command, a
+    password in a connection string, a token in a header.
+    """
+    for pattern, replacement in _SECRETS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def price_for(model: str) -> tuple[float, float]:
@@ -75,7 +111,7 @@ def estimate_cost(
 def _trim(value: Any, limit: int = MAX_DETAIL) -> Any:
     """Keep one log line to one log line."""
     if isinstance(value, str):
-        flat = " ".join(value.split())
+        flat = redact(" ".join(value.split()))
         return flat if len(flat) <= limit else flat[: limit - 1] + "…"
     if isinstance(value, dict):
         return {key: _trim(item, limit) for key, item in value.items()}
