@@ -99,9 +99,9 @@ MONGODB_URI="mongodb+srv://USER:PASSWORD@cluster0.xxxxx.mongodb.net/"
 
 Quote any value containing `#` or spaces. Anything you have actually exported
 wins over the file, so a one-off `MONGODB_URI=... jarvis doctor` still works.
-`jarvis doctor` prints which file it loaded, and every connection string is
-redacted wherever Jarvis prints one — the password never reaches your terminal
-or the audit log.
+`jarvis doctor` prints which file it loaded. Connection strings are redacted
+wherever Jarvis prints one, and credentials are scrubbed out of the audit log —
+by pattern, so treat that file as sensitive regardless.
 
 **Two Atlas things that look like network faults.** Replace `<db_username>` and
 `<db_password>` — Atlas's copy button leaves those placeholders in, and Jarvis
